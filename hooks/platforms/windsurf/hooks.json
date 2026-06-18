@@ -1,0 +1,8 @@
+{
+  "_comment": "Place at ~/.codeium/windsurf/hooks.json (Desktop) or <workspace>/.windsurf/hooks.json. Replace <SKILL_DIR>. Native: deny-irreversible (pre_run_command blocks via exit code 2). Degraded: never-stop (no blocking stop event) and never-ASK (no pre-ask hook) — both fall back to the prose contract.",
+  "hooks": {
+    "pre_run_command": [
+      { "command": "<SKILL_DIR>/hooks/enforce.sh windsurf pre_tool" }
+    ]
+  }
+}

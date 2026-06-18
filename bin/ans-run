@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""ans-run — generic ANS launcher: deterministic GO/NO-GO preflight BEFORE any token is
+spent, plus an atomic working-tree lock held by the long-lived agent process.
+
+Why this exists (and why harness/preflight.py is not enough): the harness preflight runs
+AFTER the agent session has booted — by then the first tokens are already spent and a doomed
+run has already cost money. This launcher is the pre-boot gate: it refuses to start when the
+environment cannot support an unattended run (wrong user, missing CLI credentials, broken
+git, unwritable repo, full disk, host services down) and it guarantees at most ONE run per
+working tree.
+
+Security posture (review 2026-06-10) — the config travels with the repo and describes code
+the launcher executes pre-boot, so three independent gates apply before anything runs:
+  1. TOFU trust: a repo-supplied config must be trusted once per user (interactive prompt,
+     or `ans-run --trust`); any config change invalidates trust. Headless+untrusted = NO-GO.
+  2. argv[0] allowlist: the spawned CLI must be a known agent CLI (claude/codex/gemini/
+     copilot) unless the trusted config explicitly sets launcher.allow_custom_agent.
+  3. Autonomy is explicit: a preset only launches when a human confirmed its autonomy flag
+     in the wizard (autonomy_confirmed). No flag is ever applied silently.
+
+Agent selection: named presets under launcher.agents (wizard-scaffolded), picked with
+`--agent NAME` or launcher.default_agent. NO platform detection happens at launch time —
+detection is spoofable and the session env is gone under cron anyway; the wizard is where
+detection (as a prefill hint) and the human decision live. Legacy flat launcher.agent_cmd
+still works (trusted config implies the human vouched for it).
+
+Locking design (architect-reviewed): the lock is an advisory flock(2) on
+<repo>/.unattended/ans-run.lock. The launcher acquires it non-blocking BEFORE the expensive
+preflight probes and hands the OPEN FD to the agent process, so the kernel holds the lock
+exactly as long as the run lives and releases it on any crash or kill. No pidfiles — pidfile
+schemes are TOCTOU-racy and leave stale state after a crash. Repo-local (not shared /tmp):
+only principals who can already write the repo can touch the lock. `--check` only probes the
+lock (acquire + release) so a live run is never disturbed and never blocked.
+
+Host-specific checks (services, databases, ...) are NEVER hardcoded here: they come
+exclusively from the `launcher.checks` list in <repo>/.claude/agents-never-sleep.json.
+
+Usage:
+    ans-run [--repo DIR] [--agent NAME] [--fg] [--check] [--trust] [--] PROMPT...
+
+Exit codes:
+    0   started in background / GO (--check) / trust recorded (--trust); with --fg the
+        agent's exit code is propagated
+    64  NO-GO — a blocking preflight check failed (or no prompt given)
+    65  working tree busy — another run holds the lock
+
+Env:
+    ANS_RUN_NO_LOCK=1   skip the working-tree lock (only for intentional multi-worktree
+                        setups where trees are guaranteed disjoint)
+    ANS_TRUST_STORE     override the per-user trust-store path (tests)
+
+Install note: run from the skill checkout or SYMLINK bin/ans-run into PATH — do not copy
+the file out; it imports the shared CLI map from harness/ (single source of truth).
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+_SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, _SKILL_ROOT)
+try:
+    from harness.agent_clis import AGENT_CLIS, is_allowlisted  # noqa: E402
+    from harness.keysource import resolve_ref  # noqa: E402
+    from harness.redact import register_secret  # noqa: E402
+    from harness.trust import config_digest, is_trusted, record_trust  # noqa: E402
+except ImportError as exc:  # copied out of the checkout → no single-source map
+    print(f"ans-run: cannot import the harness ({exc}) — run bin/ans-run from the skill "
+          "checkout, or symlink it into PATH instead of copying the file.", file=sys.stderr)
+    raise SystemExit(64)
+
+EX_NOGO = 64
+EX_BUSY = 65
+CONFIG_REL = os.path.join(".claude", "agents-never-sleep.json")
+LOCK_REL = os.path.join(".unattended", "ans-run.lock")
+
+DEFAULT_LAUNCHER = {
+    "target_user": None,        # re-exec (root) / require this user; None = any user
+    "default_agent": None,      # preset name under `agents` used when --agent is absent
+    "agents": {},               # {name: {cmd: [...], autonomy_confirmed: bool, env: {}}}
+    "agent_cmd": None,          # legacy flat form (pre-preset configs)
+    "allow_custom_agent": False,  # permit argv[0] outside the known-CLI allowlist
+    "credentials_paths": None,  # None = best-effort default probe (warn-only)
+    "min_disk_mb": 1000,
+    "log_dir": None,            # None = <repo>/.unattended/logs
+    "checks": [],               # [{"name": ..., "command": ..., "blocking": true}]
+    "fresh_session_every": 0,   # opt-in: respawn a FRESH agent every N completed tickets (0 = off,
+                                # one accumulating session as before). See SKILL.md "Context strategy".
+}
+# Safety cap on the fresh-session respawn loop, so a stuck sentinel can never spin forever.
+SESSION_RESPAWN_CAP = 500
+# Probed when credentials_paths is not configured. Absence is a WARNING only: platforms
+# like macOS keep Claude Code credentials in the keychain, and API-key setups have no file.
+DEFAULT_CREDENTIAL_PROBES = ["~/.claude/.credentials.json"]
+
+
+class Report:
+    """Collects preflight results; blocking failures decide GO vs NO-GO."""
+
+    def __init__(self) -> None:
+        self.failed = False
+        self.warned = False
+
+    def ok(self, msg: str) -> None:
+        print(f"  ✓ {msg}")
+
+    def bad(self, msg: str) -> None:
+        print(f"  ✗ {msg}")
+        self.failed = True
+
+    def note(self, msg: str) -> None:
+        print(f"  ⚠ {msg}")
+        self.warned = True
+
+
+def _is_interactive() -> bool:
+    return (sys.stdin.isatty() and sys.stdout.isatty()
+            and not os.environ.get("CLAUDE_UNATTENDED"))
+
+
+def load_launcher_config(repo: str, rep: Report) -> tuple:
+    """Returns (cfg, config_exists, digest, full_config). The config is read ONCE: the
+    digest is the hash of the exact bytes parsed here, so the trust decision and the
+    executed argv come from the same read (no TOCTOU second read of the repo-writable
+    path). Invalid JSON is blocking — a half-read config must never fall back to defaults
+    that launch something else. `full_config` is the whole parsed document (not just the
+    launcher section): the keysource resolver reads `integrations.vault` from it."""
+    cfg = dict(DEFAULT_LAUNCHER)
+    path = os.path.join(repo, CONFIG_REL)
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return cfg, False, None, {}
+    digest = config_digest(path, data=raw)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        rep.bad(f"{CONFIG_REL} unreadable/invalid JSON ({exc}) — fix it before launching")
+        return cfg, True, digest, {}
+    if not isinstance(data, dict):
+        rep.bad(f"{CONFIG_REL} is not a JSON object — fix it before launching")
+        return cfg, True, digest, {}
+    launcher = data.get("launcher")
+    if launcher is None:
+        rep.note("config has no `launcher` section — using launcher defaults")
+        return cfg, True, digest, data
+    if not isinstance(launcher, dict):
+        rep.bad("`launcher` section is not an object — fix the config before launching")
+        return cfg, True, digest, data
+    cfg.update(launcher)
+    return cfg, True, digest, data
+
+
+def check_trust(repo: str, digest: str, rep: Report) -> bool:
+    """TOFU gate. True = proceed. The config is executable input (agent argv + shell
+    checks), so an untrusted/changed config never runs headless. `digest` is the hash of
+    the same bytes load_launcher_config parsed."""
+    if digest is None:
+        return True  # no config -> only built-in defaults run -> nothing to trust
+    config_path = os.path.join(repo, CONFIG_REL)
+    if is_trusted(repo, config_path, digest=digest):
+        rep.ok("config trusted (hash matches the recorded trust)")
+        return True
+    if _is_interactive():
+        print(f"  ⚠ {CONFIG_REL} is NEW or CHANGED for this repo.")
+        print("    It defines commands ans-run will execute (agent argv, host checks).")
+        try:
+            answer = input("    Trust this config? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer.startswith("y"):
+            record_trust(repo, config_path, digest=digest)
+            rep.ok("config trusted (recorded for this user)")
+            return True
+        rep.bad("config not trusted — refused")
+        return False
+    rep.bad("config is new/changed and this is a non-interactive session — review the "
+            f"config, then run: ans-run --trust --repo {repo}")
+    return False
+
+
+def _user_is_root(username: str) -> bool:
+    if username == "root":
+        return True
+    try:
+        import pwd
+        return pwd.getpwnam(username).pw_uid == 0
+    except (ImportError, KeyError):
+        return False  # unknown user: sudo itself will refuse with a clear error
+
+
+def reexec_as_target_user(target_user: str) -> int:
+    """Root-guard: unattended runs must not run as root (credentials, settings and repo
+    ownership live in the target user's HOME). Re-exec keeps the launch one command.
+    For unattended use prefer running the cron/systemd job AS the target user; where
+    re-exec is needed, use a command-scoped sudoers rule (see SKILL.md) — never
+    NOPASSWD: ALL."""
+    if _user_is_root(target_user):
+        print("ans-run: launcher.target_user must not be root — refusing (would re-exec "
+              "forever)", file=sys.stderr)
+        return EX_NOGO
+    print(f"ans-run: started as root — re-exec as user '{target_user}'...", file=sys.stderr)
+    self_path = os.path.abspath(__file__)
+    try:
+        os.execvp("sudo", ["sudo", "-H", "-u", target_user, sys.executable, self_path]
+                  + sys.argv[1:])
+    except OSError as exc:
+        print(f"ans-run: re-exec via sudo failed ({exc}) — is sudo installed and is there "
+              "a command-scoped NOPASSWD rule for unattended use?", file=sys.stderr)
+        return EX_NOGO
+    return EX_NOGO  # unreachable
+
+
+def check_identity(cfg: dict, rep: Report) -> None:
+    import getpass
+    me = getpass.getuser()
+    target = cfg.get("target_user")
+    if target and _user_is_root(str(target)):
+        rep.bad("launcher.target_user must not be root")
+    elif target and me != target:
+        rep.bad(f"running as '{me}', config requires '{target}' — start as that user")
+    elif os.geteuid() == 0:
+        rep.bad("running as root with no launcher.target_user configured — refusing; "
+                "set launcher.target_user or start as the intended user")
+    else:
+        rep.ok(f"running as user '{me}'" + (" (matches target_user)" if target else ""))
+
+
+def _as_argv(raw) -> list:
+    return shlex.split(raw) if isinstance(raw, str) else [str(a) for a in (raw or [])]
+
+
+def resolve_agent(cfg: dict, config_exists: bool, agent_flag: str, rep: Report) -> tuple:
+    """Pick the agent invocation: (argv, env, preset_name). Selection NEVER constructs
+    argv on the fly — it chooses among presets a human confirmed (or the legacy flat
+    agent_cmd from a trusted config). Returns ([], {}, "") on NO-GO."""
+    known = ", ".join(sorted(AGENT_CLIS))
+    agents = cfg.get("agents") or {}
+    if agents:
+        name = agent_flag or cfg.get("default_agent")
+        if not name and len(agents) == 1:
+            name = next(iter(agents))
+        if not name:
+            rep.bad("multiple agent presets but no --agent and no launcher.default_agent "
+                    f"(available: {', '.join(sorted(agents))})")
+            return [], {}, ""
+        preset = agents.get(name)
+        if not isinstance(preset, dict):
+            rep.bad(f"agent preset '{name}' not found "
+                    f"(available: {', '.join(sorted(agents))})")
+            return [], {}, ""
+        argv = _as_argv(preset.get("cmd"))
+        if not argv:
+            rep.bad(f"agent preset '{name}' has an empty cmd")
+            return [], {}, ""
+        if not preset.get("autonomy_confirmed"):
+            rep.bad(f"agent preset '{name}' has no confirmed autonomy decision — a "
+                    "detached run would stall on its first permission prompt (or you must "
+                    "explicitly accept its autonomy flag). Run the wizard, review the "
+                    "flag, then set autonomy_confirmed=true")
+            return [], {}, ""
+        env = {str(k): str(v) for k, v in (preset.get("env") or {}).items()}
+        rep.ok(f"agent preset '{name}': {' '.join(argv)}")
+        return argv, env, name
+    if agent_flag:
+        rep.bad(f"--agent '{agent_flag}' given but the config defines no agent presets")
+        return [], {}, ""
+    legacy = cfg.get("agent_cmd")
+    if legacy:
+        # Legacy flat form: the (TOFU-trusted) config carries the full argv; the human
+        # vouched for it when trusting the config.
+        argv = _as_argv(legacy)
+        if not argv:
+            rep.bad("launcher.agent_cmd is empty")
+            return [], {}, ""
+        rep.ok(f"agent (legacy agent_cmd): {' '.join(argv)}")
+        return argv, {}, "agent_cmd"
+    if config_exists:
+        rep.bad(f"config has no agent presets and no agent_cmd — run the wizard "
+                f"(known CLIs: {known})")
+    else:
+        rep.bad(f"no {CONFIG_REL} — an unattended launch needs an explicit, human-"
+                f"confirmed agent choice. Run the wizard first (known CLIs: {known})")
+    return [], {}, ""
+
+
+# Env vars in a preset that change which code a "trusted" invocation actually runs. Even
+# under a trusted config these deserve a loud flag — the security review showed how innocent
+# a malicious preset looks at trust time (security 2026-06-10, findings 2+5).
+_RESOLUTION_ENV = ("PATH",)
+_INJECTION_ENV = ("LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "NODE_OPTIONS",
+                  "BASH_ENV", "DYLD_INSERT_LIBRARIES")
+
+# Token-shaped literal: one long run of key-alphabet characters, no path/URL separators.
+_SECRET_SHAPE = re.compile(r"^[A-Za-z0-9_.\-]{20,}$")
+
+
+def _looks_like_secret(value: str) -> bool:
+    """Heuristic for 'an API key pasted literally into the repo config': a long token-shaped
+    string (no spaces, no / or ://) mixing letters and digits with high character entropy.
+    URLs, paths, flag values and model slugs stay below the bar; a hex/base62 credential
+    clears it. Used for a WARNING only — a literal still runs, it is just flagged."""
+    if not _SECRET_SHAPE.match(value):
+        return False
+    if not (re.search(r"[A-Za-z]", value) and re.search(r"[0-9]", value)):
+        return False
+    freq: dict = {}
+    for ch in value:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(value)
+    entropy = -sum((c / n) * math.log2(c / n) for c in freq.values())
+    return entropy >= 3.5
+
+
+def resolve_preset_env(agent_env: dict, full_config: dict, rep: Report) -> dict:
+    """F4 — token-ref indirection for preset env values, resolved BEFORE the capability
+    probe so probe and spawn share the same environment (probe == spawn rule).
+
+    `env:VAR` resolves from the launcher's own environment; `vault:<mount>/<path>[#field]`
+    resolves via harness.keysource (the existing resolver — `integrations.vault` in the
+    config gates it; env:/vault: are NOT reimplemented here). A literal value passes
+    through unchanged, but a literal that LOOKS like a pasted secret is flagged in the
+    spirit of _INJECTION_ENV: token-refs are the contract, the gateway key must never live
+    in the repo config. Resolution failure (missing env var, unreadable vault path,
+    disabled vault integration) is a blocking NO-GO — never a silent empty value. Resolved
+    values are registered with the redaction layer by the resolver and are NEVER printed;
+    only the ref text (which holds no secret) appears in messages.
+
+    Trust scope (council review 2026-06-10): an `env:` ref lets the (TOFU-trusted) config
+    choose WHICH launcher env vars enter the child env — that choice is part of what the
+    human vouches for at --trust time, exactly like the argv and host checks the config
+    already carries. A failed ref never falls back to a same-named launcher var: the key
+    is omitted AND the launch is refused (rep.bad → exit 64 before any spawn)."""
+    resolved_env: dict = {}
+    for key, value in agent_env.items():
+        if value.startswith(("env:", "vault:")):
+            res = resolve_ref(value, config=full_config)
+            if not res.value:  # None or "" — an empty value must gate exactly like a missing one
+                rep.bad(f"preset env {key}: token-ref '{value}' did not resolve — "
+                        f"{res.blind_spot or 'no value at the configured source'}")
+                continue
+            rep.ok(f"preset env {key}: resolved via {res.source} (value not shown)")
+            resolved_env[key] = res.value
+        else:
+            if _looks_like_secret(value):
+                register_secret(value)
+                rep.note(f"preset env {key} looks like a LITERAL secret pasted into the "
+                         "repo config — use a token-ref (env:VAR or vault:path#field) so "
+                         "the key never lives in the repo")
+            resolved_env[key] = value
+    return resolved_env
+
+
+def check_agent_binary(argv: list, agent_env: dict, child_env: dict, cfg: dict,
+                       rep: Report) -> None:
+    """Allowlist + presence + capability probe — resolved under the EFFECTIVE CHILD ENV so
+    the probe validates the SAME binary the spawn will run (a preset PATH must not let the
+    probe check /usr/bin/claude while the launch runs a repo-shipped one). The 5s --version
+    handshake is the cheapest insurance against flag/marker rot: binary-in-PATH says nothing
+    about a CLI that moved its flags."""
+    if not argv:
+        return
+    argv0 = argv[0]
+    base = os.path.basename(argv0)
+    if not is_allowlisted(argv0):
+        if cfg.get("allow_custom_agent"):
+            rep.note(f"'{argv0}' is not a bare known-CLI name — allowed because the trusted "
+                     "config sets launcher.allow_custom_agent")
+        else:
+            rep.bad(f"'{argv0}' is not a known agent CLI invoked by bare name "
+                    f"({', '.join(sorted(AGENT_CLIS))}) — refused. A path-bearing command "
+                    "(./claude, /abs/claude) needs launcher.allow_custom_agent in the "
+                    "config + re-trust")
+            return
+    for var in _RESOLUTION_ENV + _INJECTION_ENV:
+        if var in agent_env:
+            rep.note(f"preset env sets {var} — it changes which code the agent runs; "
+                     "make sure you trust this preset")
+    # Resolve against the child PATH (preset env merged), so probe == spawn target.
+    resolved = shutil.which(argv0, path=child_env.get("PATH"))
+    if not resolved:
+        rep.bad(f"agent CLI '{argv0}' not found in PATH (as the run will see it)")
+        return
+    rep.ok(f"agent CLI found: {resolved}")
+    probe = AGENT_CLIS.get(base, {}).get("version_args")
+    if probe is None:
+        probe = _as_argv(cfg.get("agent_probe_args")) or None
+    if probe is None:
+        rep.note(f"no capability probe known for '{base}' — skipping the pre-boot "
+                 "handshake (set launcher.agent_probe_args to enable one)")
+        return
+    try:
+        # capture_output + never echoed: the probe's stdout/stderr are deliberately
+        # DISCARDED (only the rc is used), so a CLI that dumps env/config on --version
+        # can never leak a resolved token-ref value into launcher output or a log
+        # (security lens, F4 review 2026-06-10).
+        res = subprocess.run([resolved, *probe], capture_output=True, text=True,
+                             timeout=5, env=child_env)
+        if res.returncode == 0:
+            rep.ok(f"capability probe passed ({base} {' '.join(probe)})")
+        else:
+            rep.bad(f"capability probe FAILED (rc={res.returncode}) — the CLI is present "
+                    "but rejected its own probe args; flags may have drifted")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        rep.bad(f"capability probe failed to run ({exc})")
+
+
+def check_credentials(cfg: dict, rep: Report) -> None:
+    configured = cfg.get("credentials_paths")
+    paths = configured if configured is not None else DEFAULT_CREDENTIAL_PROBES
+    expanded = [os.path.expanduser(p) for p in paths]
+    found = [p for p in expanded if os.path.exists(p) and os.path.getsize(p) > 0]
+    if found:
+        rep.ok(f"credentials present: {found[0]}")
+    elif configured is not None:
+        # Explicitly configured -> the operator promised these exist -> blocking.
+        rep.bad(f"none of the configured credentials_paths exist: {expanded}")
+    else:
+        rep.note("no credential file found (keychain/API-key setups have none) — "
+                 "set launcher.credentials_paths to make this check blocking")
+
+
+def check_git(repo: str, rep: Report) -> None:
+    def _git(*args):
+        return subprocess.run(["git", "-C", repo, *args],
+                              capture_output=True, text=True, timeout=30)
+    try:
+        inside = _git("rev-parse", "--is-inside-work-tree")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        rep.bad(f"git not usable ({exc})")
+        return
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        rep.bad("git fails in repo (dubious ownership / not a repo?) — "
+                + inside.stderr.strip()[:120])
+        return
+    rep.ok("git works (no ownership problem)")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "?"
+    porcelain = _git("status", "--porcelain").stdout
+    dirty = sum(1 for line in porcelain.splitlines() if line[:2].strip())
+    staged = sum(1 for line in porcelain.splitlines() if line[:1].strip())
+    if dirty:
+        rep.note(f"branch {branch}: working tree has {dirty} changed file(s) — "
+                 "check the parked-files list before an unattended run")
+    else:
+        rep.ok(f"branch {branch}: working tree clean")
+    if staged:
+        rep.note(f"{staged} file(s) already staged — the run would not start clean")
+
+
+def check_writable(repo: str, rep: Report) -> None:
+    probe_dir = os.path.join(repo, ".unattended")
+    probe = os.path.join(probe_dir, ".preflight-write-test")
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        rep.ok("repo writable")
+    except OSError:
+        rep.bad(f"repo not writable for this user: {repo}")
+
+
+def check_disk(repo: str, cfg: dict, rep: Report) -> None:
+    mm = cfg.get("min_disk_mb")
+    min_mb = int(DEFAULT_LAUNCHER["min_disk_mb"] if mm is None else mm)
+    if min_mb <= 0:
+        rep.note("disk-space check disabled (min_disk_mb <= 0)")
+        return
+    try:
+        avail_mb = shutil.disk_usage(repo).free // (1024 * 1024)
+    except OSError:
+        rep.note("disk-space check failed — skipped")
+        return
+    if avail_mb >= min_mb:
+        rep.ok(f"disk space: {avail_mb // 1024}G free")
+    else:
+        rep.bad(f"disk space low: {avail_mb}M free (< {min_mb}M required)")
+
+
+def run_config_checks(repo: str, cfg: dict, rep: Report) -> None:
+    """Host-specific checks come ONLY from config — nothing site-specific lives in code.
+
+    Trust boundary: `command` is an operator-written shell line from the repo's own
+    config. shell=True is deliberate (pipes, env vars) and is why the TOFU gate runs
+    BEFORE this function: an untrusted repo config never reaches these commands."""
+    for chk in cfg.get("checks") or []:
+        name = str(chk.get("name") or chk.get("command") or "unnamed check")
+        command = chk.get("command")
+        blocking = bool(chk.get("blocking", True))
+        if not command:
+            rep.note(f"check '{name}' has no command — skipped")
+            continue
+        try:
+            res = subprocess.run(command, shell=True, cwd=repo, capture_output=True,
+                                 text=True, timeout=int(chk.get("timeout_s", 60)))
+            passed = res.returncode == 0
+        except subprocess.TimeoutExpired:
+            passed = False
+        if passed:
+            rep.ok(f"check '{name}' passed")
+        elif blocking:
+            rep.bad(f"check '{name}' FAILED (blocking)")
+        else:
+            rep.note(f"check '{name}' failed (non-blocking)")
+
+
+def acquire_lock(repo: str, rep: Report, *, probe_only: bool):
+    """Take the working-tree lock non-blocking, BEFORE the expensive preflight probes.
+
+    Returns (fd, busy): fd is the held lock (None when disabled or probe_only), busy is
+    True when another run holds it. The caller hands fd to the long-lived agent process so
+    the kernel releases the lock the moment the run dies. probe_only (--check) acquires and
+    releases immediately: it reports without ever blocking or disturbing a launch."""
+    if os.environ.get("ANS_RUN_NO_LOCK") == "1":
+        rep.note("ANS_RUN_NO_LOCK=1 — working-tree lock SKIPPED")
+        return None, False
+    path = os.path.join(repo, LOCK_REL)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # O_NOFOLLOW: never follow a pre-planted symlink.
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        rep.bad(f"cannot open lock file {path} ({exc}) — repo unwritable or lock poisoned")
+        return None, False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        rep.note(f"another run is active on this working tree (lock: {path})") \
+            if probe_only else rep.bad(f"working tree busy (lock: {path})")
+        return None, True
+    if probe_only:
+        os.close(fd)
+        rep.ok("no other run active on this working tree (lock free)")
+        return None, False
+    rep.ok("working-tree lock acquired (released automatically when the run ends)")
+    return fd, False
+
+
+def open_log(repo: str, cfg: dict) -> str:
+    log_dir = cfg.get("log_dir")
+    log_dir = os.path.expanduser(log_dir) if log_dir else os.path.join(
+        repo, ".unattended", "logs")
+    created = not os.path.isdir(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+    # The background run-log holds the agent's RAW stdout/stderr, which the redaction layer
+    # does NOT scrub (it covers only harness-written surfaces) — so a resolved gateway key
+    # the agent echoed can land here. Keep the log dir owner-only when we create it so the
+    # unredacted stream is never world-readable (F4 security review 2026-06-10).
+    if created:
+        try:
+            os.chmod(log_dir, 0o700)
+        except OSError:
+            pass
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return os.path.join(log_dir, f"ans-{os.path.basename(repo)}-{stamp}.log")
+
+
+def run_fresh_session_loop(repo, cfg, full_argv, child_env, fresh_n, lock_fd, release,
+                           preset_name) -> int:
+    """Opt-in context strategy: instead of ONE long accumulating agent session, spawn a FRESH
+    agent every N completed tickets so a long backlog doesn't degrade as one session.
+
+    The supervisor runs in the FOREGROUND of this process (typically already detached by
+    claude-run/cron): it holds the tree lock for the whole loop and respawns the agent until the
+    backlog is genuinely drained. Terminal detection is the run-incomplete sentinel: ABSENT after an
+    agent exits => the run reached a terminal state (DRAINED/HALTED/…) => stop. PRESENT => more work
+    => clear the per-session counter + marker and spawn a fresh agent. A hard cap bounds the loop so
+    a stuck sentinel can never spin forever.
+
+    Each agent gets UE_SESSION_TICKET_BUDGET=N (so the driver counts and the Stop-hook permits an
+    early stop) and UE_SESSION_BUDGET_MARKER pinned to the same path the hook checks."""
+    sentinel = (os.environ.get("UE_RUN_INCOMPLETE")
+                or os.path.join(repo, ".unattended", "run-incomplete"))
+    state_dir = os.path.join(repo, ".unattended", "state")
+    marker = (os.environ.get("UE_SESSION_BUDGET_MARKER")
+              or os.path.join(state_dir, "session-budget-reached"))
+    count_file = os.path.join(state_dir, "session-ticket-count")
+
+    sess_env = dict(child_env)
+    sess_env["UE_SESSION_TICKET_BUDGET"] = str(fresh_n)
+    sess_env["UE_SESSION_BUDGET_MARKER"] = marker
+
+    # Tell the agent it may stop after its session budget; the launcher resumes it fresh. The prompt
+    # is the LAST argv element (agent_argv + args.prompt); augment a copy, never the default path.
+    budget_note = (
+        f"\n\n[fresh-session budget] Implement up to {fresh_n} ticket(s) this session, then you MAY "
+        f"stop — the launcher will resume you in a FRESH session to continue the backlog. Use the "
+        f"normal next->implement->complete loop; do not try to drain everything in one session.")
+    full_argv = list(full_argv)
+    if full_argv:
+        full_argv[-1] = full_argv[-1] + budget_note
+
+    log_path = open_log(repo, cfg)
+    print(f"Fresh-session mode: respawn every {fresh_n} ticket(s), preset '{preset_name}' "
+          f"(supervisor in foreground; lock held for the whole loop)")
+    print(f"  log:   {log_path}")
+
+    try:
+        for session in range(1, SESSION_RESPAWN_CAP + 1):
+            # Reset the per-session counter + early-stop marker BEFORE each spawn: "session start"
+            # is defined as counter-absent, and a stale marker would let the new agent stop at once.
+            os.makedirs(state_dir, exist_ok=True)
+            for p in (count_file, marker):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.fchmod(log_fd, 0o600)
+            except OSError:
+                pass
+            with os.fdopen(log_fd, "ab") as logf:
+                logf.write(f"\n== ANS fresh session #{session} (budget {fresh_n}) ==\n".encode())
+                logf.flush()
+                proc = subprocess.Popen(
+                    full_argv,
+                    stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                    start_new_session=True, env=sess_env,
+                    pass_fds=(lock_fd,) if lock_fd is not None else (),
+                )
+            rc = proc.wait()
+            # Terminal detection: the driver clears the sentinel on DRAINED/HALTED/LOW_YIELD/
+            # STOPPED_CREDITS. Absent => the backlog is done => stop the loop (success).
+            if not os.path.exists(sentinel):
+                print(f"Fresh-session loop done after {session} session(s) "
+                      f"(run reached a terminal state; last agent rc={rc}).")
+                return 0
+            print(f"Session #{session} ended (rc={rc}); backlog not drained — respawning.")
+        print(f"ans-run: fresh-session cap ({SESSION_RESPAWN_CAP}) hit with work remaining — "
+              "stopping the loop. Inspect the run; the sentinel is still present.", file=sys.stderr)
+        return EX_NOGO
+    finally:
+        release()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="ans-run", add_help=True)
+    parser.add_argument("--repo", default=None, help="working tree (default: cwd)")
+    parser.add_argument("--agent", default=None,
+                        help="named agent preset from launcher.agents")
+    parser.add_argument("--fg", action="store_true",
+                        help="run in foreground (agent exit code is propagated)")
+    parser.add_argument("--check", action="store_true", help="preflight report only")
+    parser.add_argument("--trust", action="store_true",
+                        help="record trust for the repo's current config and exit")
+    parser.add_argument("prompt", nargs="*", help="prompt passed to the agent CLI")
+    args = parser.parse_args()
+
+    repo = os.path.realpath(args.repo or os.getcwd())
+    if not os.path.isdir(repo):
+        print(f"ans-run: repo dir not found: {repo}", file=sys.stderr)
+        return EX_NOGO
+
+    config_path = os.path.join(repo, CONFIG_REL)
+    if args.trust:
+        digest = record_trust(repo, config_path)
+        if digest is None:
+            print(f"ans-run: no {CONFIG_REL} in {repo} — nothing to trust", file=sys.stderr)
+            return EX_NOGO
+        print(f"Trusted {config_path} (sha256 {digest[:16]}…) for user "
+              f"{os.environ.get('USER', '?')}")
+        return 0
+
+    # Root-guard before anything else: re-exec when a target user is configured.
+    if os.geteuid() == 0:
+        try:
+            with open(config_path, "r", encoding="utf-8") as fh:
+                target = (json.load(fh).get("launcher") or {}).get("target_user")
+        except (OSError, ValueError):
+            target = None
+        if target:
+            return reexec_as_target_user(str(target))  # returns only on failure
+
+    print(f"== ANS preflight — repo: {repo} ==")
+    rep = Report()
+    cfg, config_exists, cfg_digest, full_config = load_launcher_config(repo, rep)
+
+    # TOFU gate FIRST: everything below may execute config-described commands.
+    if not check_trust(repo, cfg_digest, rep):
+        print("== NO-GO: untrusted config ==")
+        return EX_NOGO
+
+    check_identity(cfg, rep)
+
+    # Lock next: a busy tree must not pay for the expensive probes below.
+    lock_fd, busy = acquire_lock(repo, rep, probe_only=args.check)
+    if busy and not args.check:
+        print("== NO-GO: another run is active on this working tree ==")
+        print("ans-run: working tree busy — refused", file=sys.stderr)
+        return EX_BUSY
+
+    def _release():
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+    # chdir into the repo BEFORE the probe so the binary the probe resolves is the same
+    # one the spawn runs (a preset with a relative PATH entry would otherwise resolve
+    # against two different cwds). All check_* helpers take `repo` explicitly, so the
+    # early chdir is safe.
+    os.chdir(repo)
+    agent_argv, agent_env, preset_name = resolve_agent(
+        cfg, config_exists, args.agent, rep)
+    # Token-ref resolution (F4) happens HERE — before the capability probe — so the probe
+    # and the spawn see the identical resolved environment.
+    agent_env = resolve_preset_env(agent_env, full_config, rep)
+    child_env = dict(os.environ)
+    child_env.update(agent_env)
+    check_agent_binary(agent_argv, agent_env, child_env, cfg, rep)
+    check_credentials(cfg, rep)
+    check_git(repo, rep)
+    check_writable(repo, rep)
+    check_disk(repo, cfg, rep)
+    run_config_checks(repo, cfg, rep)
+
+    if rep.failed:
+        _release()
+        print("== NO-GO: fix the ✗ items above before launching ==")
+        return EX_NOGO
+    print("== GO" + (" (with warnings)" if rep.warned else "") + " ==")
+
+    if args.check:
+        _release()
+        return EX_BUSY if busy else 0
+    if not args.prompt:
+        _release()
+        print("ans-run: no prompt given", file=sys.stderr)
+        return EX_NOGO
+
+    full_argv = agent_argv + args.prompt
+
+    if args.fg:
+        # exec: this process BECOMES the agent; the inherited FD keeps the lock held for
+        # the whole run (os.open sets CLOEXEC per PEP 446, so flip inheritable explicitly)
+        # and the agent's exit code propagates naturally.
+        if lock_fd is not None:
+            os.set_inheritable(lock_fd, True)
+        sys.stdout.flush()
+        os.execvpe(full_argv[0], full_argv, child_env)
+        return 1  # unreachable
+
+    try:
+        fresh_n = int(cfg.get("fresh_session_every") or 0)
+    except (TypeError, ValueError):
+        fresh_n = 0
+    if fresh_n > 0:
+        return run_fresh_session_loop(
+            repo, cfg, full_argv, child_env, fresh_n, lock_fd, _release, preset_name)
+
+    log_path = open_log(repo, cfg)
+    # 0600: the agent's raw, UNREDACTED stream may contain a resolved gateway key — never
+    # world-readable. fchmod tightens it even if the file pre-existed looser.
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(log_fd, 0o600)
+    except OSError:
+        pass
+    with os.fdopen(log_fd, "ab") as logf:
+        proc = subprocess.Popen(
+            full_argv,
+            stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True, env=child_env,
+            pass_fds=(lock_fd,) if lock_fd is not None else (),
+        )
+    _release()  # child shares the open file description -> lock stays held by the run
+    time.sleep(2)
+    early = proc.poll()
+    if early is not None and early != 0:
+        print(f"ans-run: agent exited immediately (rc={early}) — last log lines:",
+              file=sys.stderr)
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh.readlines()[-5:]:
+                    print(f"    {line.rstrip()}", file=sys.stderr)
+        except OSError:
+            pass
+        return early
+    print(f"Started in background (PID {proc.pid}, preset '{preset_name}', "
+          "lock held by the run process)")
+    print(f"  log:   {log_path}")
+    print(f"  watch: tail -f {log_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

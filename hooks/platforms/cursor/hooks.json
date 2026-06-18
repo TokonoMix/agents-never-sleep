@@ -1,0 +1,12 @@
+{
+  "_comment": "Place at <project>/.cursor/hooks.json (or ~/.cursor/hooks.json). Replace <SKILL_DIR>. Native: deny-irreversible (beforeShellExecution). Degraded: never-stop (Cursor's stop hook cannot block — only a follow-up nudge) and never-ASK (no pre-ask hook). Both fall back to the prose contract.",
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "<SKILL_DIR>/hooks/enforce.sh cursor pre_tool" }
+    ],
+    "stop": [
+      { "command": "<SKILL_DIR>/hooks/enforce.sh cursor stop" }
+    ]
+  }
+}

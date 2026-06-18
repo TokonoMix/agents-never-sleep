@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Runtime state — never commit a run's working files
+.unattended/
+**/.unattended/
+state/
+artifacts/
+night-report*.md
+morning-report*.md
+acceptance/_runs/
+
+# Local project config that may carry real IDs/paths
+.claude/agents-never-sleep.json
+**/capability-profile.json
+
+# Editor / OS
+.DS_Store
+*.swp
+night-report.md
+
+# Download bundles — build artifacts, served from the site / shipped as release assets
+*.tar.gz
+*.zip
+phase2-night-report*.md
