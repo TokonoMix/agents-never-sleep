@@ -1,0 +1,77 @@
+# Packaging for agents-never-sleep — makes `pip install agents-never-sleep` work so external
+# users no longer need to clone the repo and hand-set PYTHONPATH (ticket INT-1964).
+#
+# The harness is pure standard-library Python (no runtime dependencies), so the wheel installs
+# fast and offline. The version is read from harness/__init__.py (single source of truth) —
+# never edit it here.
+#
+# Entry points:
+#   ans-run  -> harness.launcher:main   (pre-token GO/NO-GO preflight + working-tree lock)
+#   ans      -> harness.run:main        (the next/complete per-ticket loop CLI; also usable as
+#                                        `python -m harness.run`)
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agents-never-sleep"
+dynamic = ["version"]
+description = "Run a backlog to completion UNATTENDED — a portable Agent Skill + stdlib harness giving a coding agent durable per-ticket state, an ASK/PARK/HALT autonomy contract, deterministic test-gates, git-backed reversibility and a run report."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Tokonomix.ai" }]
+keywords = [
+    "agent", "agents", "unattended", "autonomy", "coding-agent", "claude-code",
+    "backlog", "overnight", "harness", "skill", "ans",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
+# No runtime dependencies: the harness is pure standard library by design (portability +
+# fast offline install). Keep this list empty — adding a dep is an API-surface change.
+dependencies = []
+
+[project.urls]
+Homepage = "https://tokonomix.ai"
+Source = "https://github.com/TokonoMix/agents-never-sleep"
+Changelog = "https://github.com/TokonoMix/agents-never-sleep/blob/main/CHANGELOG.md"
+
+[project.scripts]
+# pip install generates BOTH commands on PATH. `ans-run` supersedes bin/ans-run for installed
+# users (bin/ans-run stays the checkout entry point — do NOT also ship it via script-files,
+# that would put two ans-run on PATH).
+ans-run = "agents_never_sleep.launcher:main"
+ans = "agents_never_sleep.run:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "agents_never_sleep.__version__" }
+
+[tool.setuptools.packages.find]
+# Ship BOTH the real package (`agents_never_sleep`) AND the back-compat shim (`harness`, the
+# pre-1.0 import name, removed in 2.0). Dropping either breaks a published install: without
+# agents_never_sleep there is no code; without harness the legacy `python -m harness.run`
+# recipes 404. Nothing else in the skill tree is importable Python.
+include = ["agents_never_sleep*", "harness*"]
+
+[tool.setuptools.package-data]
+# PEP 561: ship the py.typed marker so type-checkers (mypy/pyright) consume the package's
+# inline annotations instead of treating it as untyped. The package is fully annotated. (The
+# `harness` shim is deprecated and intentionally ships no py.typed.)
+agents_never_sleep = ["py.typed"]
+
+[tool.pytest.ini_options]
+# `@pytest.mark.integration` tests spawn a REAL agent CLI (claude -p) — slow + costs tokens.
+# Exclude them from the default suite so a plain `pytest` stays fast and offline; run them
+# explicitly with `pytest -m integration` (a CLI -m overrides this default). The marker itself
+# is also registered in acceptance/conftest.py.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: requires a live agent CLI (claude -p); excluded from the default suite",
+]

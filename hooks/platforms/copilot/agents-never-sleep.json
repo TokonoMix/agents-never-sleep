@@ -1,0 +1,21 @@
+{
+  "_comment": "Place at <repo>/.github/hooks/agents-never-sleep.json. Replace <SKILL_DIR>. Native: deny-irreversible + never-stop + never-ASK (Copilot exposes an `ask_user` tool, so never-ASK IS enforceable here).",
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "^(bash|powershell|ask_user)$",
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh copilot pre_tool" }
+        ]
+      }
+    ],
+    "agentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh copilot stop" }
+        ]
+      }
+    ]
+  }
+}

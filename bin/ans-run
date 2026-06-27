@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""ans-run — thin shim around `harness.launcher:main`.
+
+The launcher logic lives in `harness/launcher.py` (single source of truth) so the SAME
+code runs whether ANS is used from a checkout (this script) or pip-installed (the `ans-run`
+console entry point declared in pyproject.toml). This shim only makes the `harness` package
+importable from a checkout — by prepending the skill root to sys.path — then delegates.
+
+Install note: run from the skill checkout or SYMLINK bin/ans-run into PATH — do not copy
+the file out; it imports the launcher from harness/ (single source of truth). When the
+package is pip-installed, prefer the `ans-run` console script (same entry point).
+
+Usage / flags / exit codes: see harness/launcher.py and SKILL.md.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+_SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if _SKILL_ROOT not in sys.path:
+    sys.path.insert(0, _SKILL_ROOT)
+
+try:
+    from agents_never_sleep.launcher import main
+except ImportError as exc:  # copied out of the checkout → no importable harness package
+    print(f"ans-run: cannot import the harness ({exc}) — run bin/ans-run from the skill "
+          "checkout, or symlink it into PATH instead of copying the file (or "
+          "`pip install agents-never-sleep` and use the `ans-run` command).", file=sys.stderr)
+    raise SystemExit(64)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

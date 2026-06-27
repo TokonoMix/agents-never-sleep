@@ -1,0 +1,20 @@
+{
+  "_comment": "Merge into ~/.gemini/settings.json (or project .gemini/settings.json). Replace <SKILL_DIR> with the absolute path to the agents-never-sleep skill. Native: deny-irreversible + never-stop. Degraded: never-ASK (Gemini has no pre-ask hook — relies on the prose contract).",
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh gemini pre_tool" }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh gemini stop" }
+        ]
+      }
+    ]
+  }
+}

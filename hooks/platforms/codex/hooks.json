@@ -1,0 +1,20 @@
+{
+  "_comment": "Place at ~/.codex/hooks.json (or <repo>/.codex/hooks.json), or fold into config.toml [hooks]. Replace <SKILL_DIR>. Native: deny-irreversible + never-stop. Degraded: never-ASK (no pre-ask hook).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh codex pre_tool" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "<SKILL_DIR>/hooks/enforce.sh codex stop" }
+        ]
+      }
+    ]
+  }
+}
