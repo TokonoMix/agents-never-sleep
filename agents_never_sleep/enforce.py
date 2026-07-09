@@ -23,6 +23,7 @@ import os
 import sys
 
 from .enforcement import Action, decide
+from .fsutil import ensure_private_dir
 
 _UNATTENDED_ENV = ("UE_UNATTENDED", "CLAUDE_UNATTENDED")
 _STOP_LOOP_CAP = 5  # anti-infinite-loop: stop blocking after this many auto-continues
@@ -70,7 +71,7 @@ def _stop_block_count() -> int:
 def _bump_stop_block() -> None:
     n = _stop_block_count() + 1  # read BEFORE opening for write (open("w") truncates first)
     try:
-        os.makedirs(os.path.dirname(_counter_path()) or ".", exist_ok=True)
+        ensure_private_dir(os.path.dirname(_counter_path()))
         with open(_counter_path(), "w", encoding="utf-8") as fh:
             fh.write(str(n))
     except OSError:

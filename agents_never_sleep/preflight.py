@@ -18,6 +18,8 @@ import os
 import shutil
 import subprocess
 
+from .fsutil import ensure_private_dir
+
 
 @dataclasses.dataclass
 class CapabilityProfile:
@@ -163,7 +165,7 @@ def write_profile(profile: CapabilityProfile, path: str) -> None:
     (unwritable state dir) degrades silently rather than crashing the caller, matching
     gate_cache.write's same fail-safe idiom (2026-07-08 E2E, second session)."""
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(profile.to_json(), fh, indent=2, sort_keys=True)
     except OSError:

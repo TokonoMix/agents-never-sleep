@@ -19,7 +19,8 @@ SKILL_ROOT = os.path.dirname(HERE)
 sys.path.insert(0, SKILL_ROOT)
 
 from agents_never_sleep import redact as R  # noqa: E402
-from agents_never_sleep.keysource import VaultClient, VaultError, resolve_ref  # noqa: E402
+from agents_never_sleep.keysource import (VaultClient, VaultError, is_safe_endpoint,  # noqa: E402
+                                          resolve_ref)
 
 VAULT_ON = {"integrations": {"vault": {"enabled": True}}}
 VAULT_OFF = {"integrations": {"vault": {"enabled": False}}}
@@ -158,6 +159,44 @@ def test_resolve_vault(failures):
         failures.append(f"[resolve vault] no auth material should degrade with a blind spot: {rn}")
 
 
+def test_is_safe_endpoint(failures):
+    safe = [
+        "http://127.0.0.1:8200", "http://localhost:8200", "http://LOCALHOST:8200",
+        "http://[::1]:8200", "https://vault.internal.example.com",
+        "https://127.0.0.1:8200",  # https + loopback is still fine
+    ]
+    unsafe = [
+        "http://vault.internal.example.com", "http://10.0.0.5:8200",
+        "http://192.168.1.1:8200", "", None,
+    ]
+    for url in safe:
+        if not is_safe_endpoint(url):
+            failures.append(f"[safe-endpoint] should be SAFE: {url!r}")
+    for url in unsafe:
+        if is_safe_endpoint(url):
+            failures.append(f"[safe-endpoint] should be UNSAFE: {url!r}")
+
+
+def test_resolve_vault_unsafe_endpoint_blind_spot(failures):
+    """L5 (post-audit): a SUCCESSFUL read from a non-loopback, non-https Vault still carries a
+    blind spot — the secret traveled over the network in cleartext even though the read worked."""
+    sec = "vault-resolved-secret-value-abcdef123456"
+    remote = VaultClient("http://vault.remote.example.com", token="t-12345678",
+                         opener=_opener({"/v1/secret/data/svc/key": '{"data":{"data":{"k":"%s"}}}' % sec}))
+    r = resolve_ref("vault:secret/svc/key#k", config=VAULT_ON, client=remote)
+    if r.value != sec:
+        failures.append(f"[unsafe-endpoint] read should still succeed: {r}")
+    if not r.blind_spot or "cleartext" not in r.blind_spot:
+        failures.append(f"[unsafe-endpoint] successful-but-unsafe read should still carry a "
+                        f"blind spot: {r}")
+
+    loopback = VaultClient("http://127.0.0.1:8200", token="t-12345678",
+                           opener=_opener({"/v1/secret/data/svc/key": '{"data":{"data":{"k":"%s"}}}' % sec}))
+    r2 = resolve_ref("vault:secret/svc/key#k", config=VAULT_ON, client=loopback)
+    if r2.blind_spot:
+        failures.append(f"[safe-endpoint] loopback read should be silent (no blind spot): {r2}")
+
+
 def test_resolve_edge(failures):
     if resolve_ref(None, config=VAULT_ON).source != "absent":
         failures.append("[edge] None ref should be absent")
@@ -204,6 +243,8 @@ def main() -> int:
         test_sanitized_errors(failures)
         test_resolve_env(failures)
         test_resolve_vault(failures)
+        test_is_safe_endpoint(failures)
+        test_resolve_vault_unsafe_endpoint_blind_spot(failures)
         test_resolve_edge(failures)
         test_blind_spots_surfaced(failures)
     finally:

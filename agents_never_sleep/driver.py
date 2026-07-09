@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 
+from .fsutil import ensure_private_dir
 from .orchestrator import BAD_STATES, Orchestrator, ProceedToken
 from .vcs import GitError
 from .decide import Action
@@ -65,7 +66,7 @@ def live_tree_decision(is_linked: bool, is_clean: bool, policy) -> str:
 
 
 def _atomic_write_json(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    ensure_private_dir(os.path.dirname(path))
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -253,7 +254,7 @@ class StepDriver:
         # (2026-07-08 E2E, 2.1): writing it anywhere else is pointless anyway — the Stop-hook only
         # reads THIS path, so never-stop is inactive either way.
         try:
-            os.makedirs(os.path.dirname(self.sentinel_path), exist_ok=True)
+            ensure_private_dir(os.path.dirname(self.sentinel_path))
             if not os.path.exists(self.sentinel_path):
                 with open(self.sentinel_path, "w", encoding="utf-8") as fh:
                     fh.write("run in progress\n")
@@ -306,11 +307,11 @@ class StepDriver:
         except (OSError, ValueError):
             count = 0
         count += 1
-        os.makedirs(os.path.dirname(self.session_count_path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(self.session_count_path))
         with open(self.session_count_path, "w", encoding="utf-8") as fh:
             fh.write(str(count))
         if count >= budget:
-            os.makedirs(os.path.dirname(self.session_marker_path), exist_ok=True)
+            ensure_private_dir(os.path.dirname(self.session_marker_path))
             with open(self.session_marker_path, "w", encoding="utf-8") as fh:
                 fh.write(f"session reached {count}/{budget} tickets\n")
             return True

@@ -17,13 +17,17 @@ launcher instead shrinks the blast radius the cheap, complete way: the log is cr
 prefer `--fg` (output goes to the operator's terminal, not an on-disk log) or a `launcher.log_dir`
 on restricted storage.
 
-DESIGN (deliberate, learned the hard way): match a secret by its VALUE SHAPE, never by a nearby
-keyword. This codebase's own legitimate output is saturated with the words a naive scrubber keys on —
-"token" (tokonomix), "secret", "Authorization" (the Paperclip client), "security" (a specialist
-lens), "password" — and `build_report` runs inside the acceptance tests. A keyword-anchored pattern
-would shred report prose and coverage tags (and break the suite). So every pattern below is anchored
+DESIGN (deliberate, learned the hard way): match a secret by its VALUE SHAPE, never by mere PROXIMITY
+to a keyword. This codebase's own legitimate output is saturated with the words a naive scrubber keys
+on — "token" (tokonomix), "secret", "Authorization" (the Paperclip client), "security" (a specialist
+lens), "password" — and `build_report` runs inside the acceptance tests. A proximity-anchored pattern
+would shred report prose and coverage tags (and break the suite). So most patterns below are anchored
 to the credential's own structure (a `pcp_` board token, a JWT's three base64 segments, a PEM block,
-`scheme://user:pass@host`, a provider key prefix). Notably we do NOT redact bare long hex/base64:
+`scheme://user:pass@host`, a provider key prefix). One bounded exception: a handful of patterns anchor
+on the keyword being the thing ASSIGNED (`keyword\s*[:=]\s*value`, e.g. `authorization:`,
+`TOKONOMIX_KEY=`, and the generic `password|secret|token|api_key` rule near the end) — assignment
+syntax essentially never appears in prose, and the no-whitespace value charset means a colon-led
+sentence can only ever eat its first word. Notably we do NOT redact bare long hex/base64:
 a 40-char hex string is just as likely a git SHA (which the harness commits/reports) as a secret.
 
 Pattern matching is the backstop; the LITERAL-VALUE REGISTRY is the precise half — register the exact
@@ -45,7 +49,7 @@ _MIN_SECRET_LEN = 8
 # name. Kept to an explicit allowlist so we don't vacuum unrelated config into the scrubber.
 _SECRET_ENV_VARS = (
     "PAPERCLIP_TOKEN", "VAULT_TOKEN", "TOKONOMIX_API_KEY", "TOKONOMIX_KEY",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
 )
 
 # Shape-anchored patterns. Each (compiled regex, replacement). `\g<...>` keeps a non-secret prefix
@@ -75,6 +79,15 @@ _PATTERNS = [
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "[REDACTED:github-token]"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED:slack-token]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED:aws-key]"),
+    # Stripe secret/restricted keys. NOT pk_ (publishable keys are meant to be public).
+    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"), "[REDACTED:stripe-key]"),
+    # Google API key.
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED:google-api-key]"),
+    # SendGrid API key: SG.<segment>.<segment>.
+    (re.compile(r"\bSG\.[\w-]{16,}\.[\w-]{16,}\b"), "[REDACTED:sendgrid-key]"),
+    # Twilio API Key SID (the auth token is a bare 32-hex string — indistinguishable from a git SHA,
+    # so deliberately not matched here; same reasoning as the AWS/OpenAI-adjacent bare-hex exclusion).
+    (re.compile(r"\bSK[0-9a-fA-F]{32}\b"), "[REDACTED:twilio-key]"),
     # Authorization header value (Bearer/Basic/<token>) — keep the field name, drop the value.
     (re.compile(r"(?i)(?P<p>authorization\s*[:=]\s*)(?:bearer\s+|basic\s+)?[A-Za-z0-9._~+/=\-]{8,}"),
      r"\g<p>[REDACTED:authorization]"),
@@ -83,7 +96,29 @@ _PATTERNS = [
     # Credentials embedded in a connection URL: scheme://user:password@host -> scheme://user:***@host.
     (re.compile(r"(?P<p>[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(?P<a>@)"),
      r"\g<p>[REDACTED:url-credential]\g<a>"),
+    # Generic credential-keyword ASSIGNMENT (password/secret/token/api-key = value) — a bounded
+    # exception to the value-shape-only rule above, using the exact same anchor-on-`[:=]` technique
+    # already proven for authorization:/TOKONOMIX_KEY= (not proximity — the keyword must be the
+    # thing being assigned). Catches unlabeled DB/service credentials like `MYSQL_PWD=…` or
+    # `DB_PASSWORD: …` that carry no distinctive shape of their own — the leading lookbehind allows
+    # an underscore right before the keyword (SCREAMING_SNAKE_CASE env-var style) without allowing a
+    # letter/digit there, so "MYSQL_PWD" matches at "PWD" but "passwordless" never matches "password"
+    # (blocked by the trailing requirement: the very next char must be `[:=]`, not a letter). The
+    # no-whitespace value charset means a colon-led SENTENCE ("secret: as discussed below...") can
+    # only ever eat its first word, and the 8-char floor keeps short non-secret flags ("secret:
+    # false") out of the strainer.
+    (re.compile(r"(?i)(?P<p>(?<![A-Za-z0-9])(?:password|passwd|pwd|secret|token|api[_-]?key)"
+                r"\s*[:=]\s*)[A-Za-z0-9._~+/=\-]{8,}"),
+     r"\g<p>[REDACTED:credential]"),
 ]
+
+
+def known_secret_env_var_names() -> tuple:
+    """The env var NAMES whose values are ANS's own resolved operational credentials (see
+    `_SECRET_ENV_VARS` above) — for a consumer that needs to SCRUB them from an env dict handed to
+    an untrusted subprocess (a repo's own gate/test command has no legitimate need to inherit ANS's
+    gateway keys), not just harvest their values for redaction."""
+    return _SECRET_ENV_VARS
 
 
 def register_secret(value) -> bool:

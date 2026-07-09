@@ -25,6 +25,8 @@ import json
 import os
 import subprocess
 
+from .fsutil import ensure_private_dir
+
 
 class ParkedGuard:
     def __init__(self, repo: str, state_dir: str, *, tracked_paths=None, throwaway_globs=None,
@@ -135,7 +137,7 @@ class ParkedGuard:
                 stash_sha = sha or None
         if self.globs:
             self._add_fence()
-        os.makedirs(self.state_dir, exist_ok=True)
+        ensure_private_dir(self.state_dir)
         tmp = self.marker + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"label": self.label, "stashed": stashed, "stash_sha": stash_sha,

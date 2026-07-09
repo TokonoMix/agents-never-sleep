@@ -49,6 +49,7 @@ import time
 
 from .agent_clis import (AGENT_CLIS, cli_for_argv, is_allowlisted,
                          is_noninteractive_permission)
+from .fsutil import ensure_private_dir
 from .keysource import resolve_ref
 from .redact import register_secret
 from .trust import config_digest, is_trusted, record_trust
@@ -172,6 +173,30 @@ def _user_is_root(username: str) -> bool:
         return pwd.getpwnam(username).pw_uid == 0
     except (ImportError, KeyError):
         return False  # unknown user: sudo itself will refuse with a clear error
+
+
+def trusted_target_user(repo: str, config_path: str) -> str | None:
+    """The `launcher.target_user` from a TRUSTED config, or None — missing config, untrusted
+    config, unparseable config, or no target_user set all return None alike (L3, post-audit).
+
+    The config is untrusted, repo-writable input; reading target_user from it before TOFU
+    verification would let a malicious repo pick which user identity a root-launched process
+    assumes, ahead of (and regardless of) the ordinary trust gate later in `main()`. Reads the
+    config bytes ONCE so the trust check and the value it gates come from the identical buffer
+    (`config_digest`'s own "hash the buffer you parsed" rule) — no second, TOCTOU-able read of a
+    repo-writable path between the check and the value it's supposed to protect."""
+    try:
+        with open(config_path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    if not is_trusted(repo, config_path, digest=config_digest(config_path, data=raw)):
+        return None
+    try:
+        target = (json.loads(raw.decode("utf-8")).get("launcher") or {}).get("target_user")
+    except ValueError:
+        return None
+    return str(target) if target else None
 
 
 def reexec_as_target_user(target_user: str) -> int:
@@ -401,6 +426,8 @@ def resolve_preset_env(agent_env: dict, full_config: dict, rep: Report) -> dict:
                         f"{res.blind_spot or 'no value at the configured source'}")
                 continue
             rep.ok(f"preset env {key}: resolved via {res.source} (value not shown)")
+            if res.blind_spot:  # e.g. L5's non-loopback/non-https vault endpoint warning
+                rep.note(f"preset env {key}: {res.blind_spot}")
             resolved_env[key] = res.value
         else:
             if _looks_like_secret(value):
@@ -512,7 +539,7 @@ def check_writable(repo: str, rep: Report) -> None:
     probe_dir = os.path.join(repo, ".unattended")
     probe = os.path.join(probe_dir, ".preflight-write-test")
     try:
-        os.makedirs(probe_dir, exist_ok=True)
+        ensure_private_dir(probe_dir)
         with open(probe, "w", encoding="utf-8") as fh:
             fh.write("ok")
         os.remove(probe)
@@ -577,7 +604,7 @@ def acquire_lock(repo: str, rep: Report, *, probe_only: bool):
         return None, False
     path = os.path.join(repo, LOCK_REL)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
         # O_NOFOLLOW: never follow a pre-planted symlink.
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     except OSError as exc:
@@ -661,13 +688,16 @@ def run_fresh_session_loop(repo, cfg, full_argv, child_env, fresh_n, lock_fd, re
         for session in range(1, SESSION_RESPAWN_CAP + 1):
             # Reset the per-session counter + early-stop marker BEFORE each spawn: "session start"
             # is defined as counter-absent, and a stale marker would let the new agent stop at once.
-            os.makedirs(state_dir, exist_ok=True)
+            ensure_private_dir(state_dir)
             for p in (count_file, marker):
                 try:
                     os.unlink(p)
                 except OSError:
                     pass
-            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            # O_NOFOLLOW (L4, post-audit): the log carries the agent's raw, UNREDACTED stream — a
+            # pre-planted symlink at log_path must not redirect that write to an attacker-chosen
+            # file, same rationale as acquire_lock's own O_NOFOLLOW open.
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             try:
                 os.fchmod(log_fd, 0o600)
             except OSError:
@@ -775,15 +805,14 @@ def main() -> int:
               f"{os.environ.get('USER', '?')}")
         return 0
 
-    # Root-guard before anything else: re-exec when a target user is configured.
+    # Root-guard before anything else: re-exec when a TRUSTED config configures a target user.
+    # An untrusted config's target_user is never acted on here (trusted_target_user returns None)
+    # — the ordinary TOFU gate below still runs (still as root) and NO-GOes on an untrusted
+    # config, so nothing repo-described ever executes either way.
     if os.geteuid() == 0:
-        try:
-            with open(config_path, "r", encoding="utf-8") as fh:
-                target = (json.load(fh).get("launcher") or {}).get("target_user")
-        except (OSError, ValueError):
-            target = None
+        target = trusted_target_user(repo, config_path)
         if target:
-            return reexec_as_target_user(str(target))  # returns only on failure
+            return reexec_as_target_user(target)  # returns only on failure
 
     print(f"== ANS preflight — repo: {repo} ==")
     rep = Report()
@@ -855,6 +884,14 @@ def main() -> int:
         os.execvpe(full_argv[0], full_argv, child_env)
         return 1  # unreachable
 
+    # Every detached path from here on (fresh-session loop, watchdog-wrapped, or a bare direct
+    # spawn with --no-watchdog) MUST run with CLAUDE_UNATTENDED=1 so the deny hooks are armed. This
+    # used to be set only by watchdog.py's own child env when the watchdog wrapper was in play —
+    # --no-watchdog, and fresh-session mode (which never touches watchdog.py at all), could silently
+    # launch the agent with enforcement disarmed. Force it here, unconditionally, upstream of every
+    # detached branch, so no combination of flags can leave it unset (post-audit hardening, M1).
+    child_env["CLAUDE_UNATTENDED"] = "1"
+
     try:
         fresh_n = int(cfg.get("fresh_session_every") or 0)
     except (TypeError, ValueError):
@@ -890,8 +927,10 @@ def main() -> int:
 
     log_path = open_log(repo, cfg)
     # 0600: the agent's raw, UNREDACTED stream may contain a resolved gateway key — never
-    # world-readable. fchmod tightens it even if the file pre-existed looser.
-    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # world-readable. fchmod tightens it even if the file pre-existed looser. O_NOFOLLOW (L4,
+    # post-audit): a pre-planted symlink at log_path must not redirect that unredacted write to
+    # an attacker-chosen file, same rationale as acquire_lock's own O_NOFOLLOW open.
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(log_fd, 0o600)
     except OSError:

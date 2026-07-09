@@ -28,6 +28,7 @@ import sys
 from . import config
 from .config import ensure_config, load_config
 from .driver import RunResumeUnsafe, StepDriver
+from .fsutil import ensure_private_dir
 from .gates import GateRunner
 from .heartbeat import Heartbeat
 from .ledger import AttemptLedger
@@ -52,8 +53,8 @@ def _resolve_writable_state_dirs(repo: str, state_dir: str, artifacts_dir: str,
     session). Redirect both dirs outside the repo, keyed by the repo's own path so repeated
     next/complete calls against the same repo keep finding the same fallback location."""
     try:
-        os.makedirs(state_dir, exist_ok=True)
-        os.makedirs(artifacts_dir, exist_ok=True)
+        ensure_private_dir(state_dir)
+        ensure_private_dir(artifacts_dir)
         # makedirs(exist_ok=True) succeeds on an EXISTING dir even when it is read-only (the
         # "harness ran while writable, then the tree got locked" case), so probe an actual write —
         # otherwise the very first state write (progress/skip/outcome) still dies later with a raw
@@ -73,8 +74,8 @@ def _resolve_writable_state_dirs(repo: str, state_dir: str, artifacts_dir: str,
     fallback_state = os.path.join(base, "state")
     fallback_artifacts = os.path.join(base, "artifacts")
     try:
-        os.makedirs(fallback_state, exist_ok=True)
-        os.makedirs(fallback_artifacts, exist_ok=True)
+        ensure_private_dir(fallback_state)
+        ensure_private_dir(fallback_artifacts)
         blind_spots.append(
             f"repo state dir {state_dir!r} is not writable — harness bookkeeping redirected to "
             f"{base!r} for this repo (read-only-repo degrade)")
@@ -160,7 +161,9 @@ class _Context:
             r = resolve_ref(tk_ref, config=self.config)
             if r.value:
                 os.environ["TOKONOMIX_API_KEY"] = r.value
-            elif r.blind_spot:
+            # Not `elif`: a SUCCESSFUL resolution can still carry a blind spot (e.g. L5's
+            # non-loopback/non-https vault endpoint warning) — surface it either way.
+            if r.blind_spot:
                 self.key_blind_spots.append(r.blind_spot)
 
         # Fallback: if TOKONOMIX_API_KEY is still unset (token_ref null or unresolved), read it
@@ -257,6 +260,18 @@ def _error_code(out) -> int:
     return 2 if isinstance(out, dict) and out.get("status") == "ERROR" else 0
 
 
+def _note_unsafe_paperclip_endpoint(ctx, pc_cfg: dict) -> None:
+    """L5 (post-audit): a non-loopback, non-https base_url puts the bearer token on the wire in
+    cleartext on every request. Not a hard-fail (the shipped default is loopback, so this is silent
+    out of the box) — a blind spot, same treatment as an unresolved token."""
+    from .keysource import is_safe_endpoint
+    base_url = pc_cfg.get("base_url") or ""
+    if base_url and not is_safe_endpoint(base_url):
+        ctx.key_blind_spots.append(
+            f"integrations.paperclip.base_url {base_url!r} is neither loopback nor https — the "
+            "Paperclip bearer token travels over the network in cleartext on every request")
+
+
 def _load_paperclip_tickets_for(ctx) -> list | None:
     """If Paperclip is configured, pull open issues as tickets; else None (fall back to local .md)."""
     pc_cfg = (ctx.config.get("integrations", {}).get("paperclip", {}) or {})
@@ -268,6 +283,7 @@ def _load_paperclip_tickets_for(ctx) -> list | None:
         print(f"[agents-never-sleep] Paperclip enabled but token unresolved: {reason} — "
               "falling back to local tickets.", file=sys.stderr)
         return None
+    _note_unsafe_paperclip_endpoint(ctx, pc_cfg)
     from .sources.paperclip import PaperclipClient, to_ticket
     ctx.paperclip = PaperclipClient(pc_cfg["base_url"], resolved.value, pc_cfg["company_id"],
                                     write_enabled=bool(pc_cfg.get("write_enabled")))
@@ -303,6 +319,7 @@ def _init_paperclip_write_for(ctx) -> None:
               f"({resolved.blind_spot or 'no token'}) — per-ticket status-sync degraded to a "
               "blind spot (work still completes).", file=sys.stderr)
         return
+    _note_unsafe_paperclip_endpoint(ctx, pc_cfg)
     from .sources.paperclip import PaperclipClient
     ctx.paperclip = PaperclipClient(pc_cfg["base_url"], resolved.value, pc_cfg["company_id"],
                                     write_enabled=bool(pc_cfg.get("write_enabled")))
@@ -711,7 +728,7 @@ def main(argv=None) -> int:
         try:
             repo = os.path.abspath(getattr(args, "repo", ".") or ".")
             sd = os.path.join(repo, getattr(args, "state_dir", None) or ".unattended/state")
-            os.makedirs(sd, exist_ok=True)
+            ensure_private_dir(sd)
             with open(os.path.join(sd, "resume-halt"), "w", encoding="utf-8") as fh:
                 fh.write(str(exc) + "\n")
         except OSError:

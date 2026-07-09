@@ -95,6 +95,9 @@ def _trusted_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
 
 SLEEPER = "#!/bin/sh\nsleep 4\nexit 0\n"
 INSTANT_FAIL = "#!/bin/sh\nexit 7\n"
+# Dumps CLAUDE_UNATTENDED into a file beside itself so a detached test can inspect what the spawned
+# agent actually saw, then exits fast (no lingering process to wait out).
+ENV_DUMPER = '#!/bin/sh\necho "${CLAUDE_UNATTENDED:-UNSET}" > "$(dirname "$0")/env-dump.txt"\nexit 0\n'
 
 
 def test_untrusted_config_headless_is_nogo(failures):
@@ -526,6 +529,40 @@ def test_default_watchdog_surfaces_instant_crash(failures):
                         f"{res.returncode}: {res.stdout}{res.stderr}")
 
 
+def test_run_log_open_rejects_symlink(failures):
+    # L4 (post-audit): the run-log holds the agent's RAW, unredacted stdout/stderr — a pre-planted
+    # symlink at the computed log path must not redirect that write to an attacker-chosen file.
+    # open_log() picks a deterministic (repo, cfg) -> path; plant a symlink there and open it with
+    # the EXACT flags launcher.py uses, proving O_NOFOLLOW is actually wired in, not just present
+    # in a comment.
+    sys.path.insert(0, SKILL_ROOT)
+    from agents_never_sleep.launcher import open_log
+    work = tempfile.mkdtemp(prefix="ue-nofollow-")
+    repo = os.path.join(work, "repo")
+    os.makedirs(repo)
+    target = os.path.join(work, "attacker-owned-file")
+    log_path = open_log(repo, {})
+    os.symlink(target, log_path)
+
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        failures.append(f"[nofollow] open() followed a pre-planted symlink at {log_path!r}")
+    except OSError:
+        pass  # expected: O_NOFOLLOW refuses to open through the symlink
+
+    if os.path.exists(target):
+        failures.append("[nofollow] the symlink target was created/written despite O_NOFOLLOW")
+
+    # Sanity: WITHOUT O_NOFOLLOW the same symlink WOULD be followed — proves the test is actually
+    # discriminating, not just always-pass.
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.close(fd)
+    if not os.path.exists(target):
+        failures.append("[nofollow] test sanity check failed: symlink should be followed without "
+                        "O_NOFOLLOW")
+
+
 def test_bg_start_reports_log_and_pid(failures):
     repo = _trusted_repo(SLEEPER)
     res = _run(repo, "go")
@@ -548,6 +585,88 @@ def test_bg_start_reports_log_and_pid(failures):
         failures.append(f"[bg] --no-watchdog should report watchdog OFF: "
                         f"{res2.returncode}: {res2.stdout}")
     time.sleep(5)  # let the sleeper finish so the tmp repo can be cleaned up
+
+
+def _read_env_dump(repo: str, timeout: int = 15) -> str | None:
+    path = os.path.join(repo, "env-dump.txt")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path):
+            with open(path) as fh:
+                return fh.read().strip()
+        time.sleep(0.2)
+    return None
+
+
+def test_trusted_target_user_requires_trust(failures):
+    # L3 (post-audit): the root-guard must not read launcher.target_user from an UNTRUSTED config —
+    # a malicious repo could otherwise pick which user identity a root-launched process assumes,
+    # ahead of (and regardless of) the ordinary TOFU gate. trusted_target_user() is the single
+    # decision point; prove it returns None pre-trust and the real value post-trust.
+    sys.path.insert(0, SKILL_ROOT)
+    from agents_never_sleep.launcher import trusted_target_user
+    os.environ["ANS_TRUST_STORE"] = TRUST_STORE
+    os.environ["ANS_TEST_MODE"] = "1"
+
+    repo = _new_repo(SLEEPER, {"target_user": "some-target-user"})
+    config_path = os.path.join(repo, ".claude", "agents-never-sleep.json")
+
+    pre = trusted_target_user(repo, config_path)
+    if pre is not None:
+        failures.append(f"[root-guard] untrusted config's target_user was honored: {pre!r}")
+
+    res = _run(repo, "--trust")
+    if res.returncode != 0:
+        failures.append(f"[root-guard] --trust failed: {res.stdout}{res.stderr}")
+
+    post = trusted_target_user(repo, config_path)
+    if post != "some-target-user":
+        failures.append(f"[root-guard] trusted config's target_user not honored: {post!r}")
+
+    # Changing the config (even just re-adding the same key) invalidates trust — the stale target
+    # from before the edit must not survive either.
+    _write_config(repo, {"agent_cmd": [os.path.join(repo, "fake-agent.sh")],
+                         "allow_custom_agent": True, "min_disk_mb": 1,
+                         "target_user": "a-different-user"})
+    changed = trusted_target_user(repo, config_path)
+    if changed is not None:
+        failures.append(f"[root-guard] config change should invalidate trust, got {changed!r}")
+
+
+def test_claude_unattended_forced_on_all_detached_paths(failures):
+    # M1 (post-audit): CLAUDE_UNATTENDED=1 used to reach the spawned agent only via watchdog.py's
+    # own child env, so --no-watchdog (and fresh-session mode, which never touches watchdog.py at
+    # all) could silently launch the agent with every CLAUDE_UNATTENDED-gated deny hook disarmed.
+    # The launcher now forces it upstream of every detached branch — prove each branch actually
+    # sees "1", not just the default watchdog-wrapped path that happened to work before.
+
+    # --no-watchdog: the bare direct-spawn path.
+    repo = _trusted_repo(ENV_DUMPER)
+    res = _run(repo, "--no-watchdog", "go")
+    if res.returncode != 0:
+        failures.append(f"[unattended-nowd] expected 0, got {res.returncode}: {res.stdout}{res.stderr}")
+    seen = _read_env_dump(repo)
+    if seen != "1":
+        failures.append(f"[unattended-nowd] CLAUDE_UNATTENDED should be '1', got {seen!r}")
+
+    # Default (watchdog-wrapped) path — regression guard, this one worked before the fix too.
+    repo2 = _trusted_repo(ENV_DUMPER)
+    res2 = _run(repo2, "go")
+    if res2.returncode != 0:
+        failures.append(f"[unattended-wd] expected 0, got {res2.returncode}: {res2.stdout}{res2.stderr}")
+    seen2 = _read_env_dump(repo2)
+    if seen2 != "1":
+        failures.append(f"[unattended-wd] CLAUDE_UNATTENDED should be '1', got {seen2!r}")
+
+    # fresh-session mode: a THIRD detached path that bypasses watchdog.py entirely.
+    repo3 = _trusted_repo(ENV_DUMPER, {"fresh_session_every": 1})
+    res3 = _run(repo3, "go")
+    if res3.returncode != 0:
+        failures.append(f"[unattended-fresh] expected 0, got {res3.returncode}: "
+                        f"{res3.stdout}{res3.stderr}")
+    seen3 = _read_env_dump(repo3)
+    if seen3 != "1":
+        failures.append(f"[unattended-fresh] CLAUDE_UNATTENDED should be '1', got {seen3!r}")
 
 
 def main() -> int:
@@ -578,6 +697,9 @@ def main() -> int:
     test_simultaneous_starts_exactly_one_wins(failures)
     test_lock_released_after_agent_death(failures)
     test_bg_start_reports_log_and_pid(failures)
+    test_run_log_open_rejects_symlink(failures)
+    test_claude_unattended_forced_on_all_detached_paths(failures)
+    test_trusted_target_user_requires_trust(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — launcher guarantees not proven")

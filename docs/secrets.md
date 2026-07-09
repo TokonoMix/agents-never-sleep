@@ -56,6 +56,12 @@ direct `VAULT_TOKEN` *or* AppRole login (`role_id` + `secret_id` → `auth.clien
 `/v1/<mount>/data/<rest>`. Whatever is resolved is **registered with the redaction layer** so it can never
 appear in a log or report, and a token / secret-id / KV value **never** appears in an exception message.
 
+**Remote Vault must be https.** The shipped default is loopback, so the auth material never leaves the
+host. If you point `VAULT_ADDR` (or `integrations.paperclip.base_url`) at a **remote** host, it must be
+`https://` — a non-loopback `http://` endpoint puts the credential on the wire in cleartext.
+`keysource.is_safe_endpoint()` is the check; a resolution that succeeds against an unsafe endpoint still
+raises a run-report blind spot (it does not block the run — only a resolution *failure* is a hard-fail).
+
 ### Resolve-time policy: fail-closed at launch, degrade at runtime
 
 The two failure modes are deliberately different:
@@ -74,6 +80,13 @@ When a launcher preset points the agent at the Tokonomix gateway, the gateway ke
 token-ref — resolved into the child env before the probe, registered with redaction, never printed. Which
 launcher env vars an `env:` ref may pull into the child is part of what a human vouches for at `--trust`
 time. See [launcher](launcher.md).
+
+`run.py` also resolves a Vault-backed Tokonomix key into `os.environ` for its own in-process consumers
+(the onboarding gate, council). That process-wide env is *not* what a **gate command** runs with: the
+gate is the target repo's own, arbitrary test/build command, so `gates._run_command` strips ANS's own
+known resolved-credential env vars (`redact.known_secret_env_var_names()`) before spawning it — a
+`vault:`/`env:` ref's whole point is keeping the key out of reach of code that doesn't need it, and the
+gate command is exactly that code.
 
 ## Boundary
 

@@ -17,7 +17,13 @@ reporters who follow coordinated disclosure.
 
 - **Never-ASK in unattended mode** — an ask-tool is denied; the run PARKs or PROCEEDs, never blocks.
 - **Never-irreversible unsupervised** — force-push, remote branch/tag delete, destructive SQL,
-  and disk-destructive commands (`mkfs`, `dd of=/dev/…`, `shred`) are denied by the hooks.
+  and disk-destructive commands (`mkfs`, `dd of=/dev/…`, `shred`) are denied by the hooks. This is a
+  **backstop, not a boundary**: the deny patterns (`agents_never_sleep/enforcement.py`, the single
+  source of truth every platform hook shares) are shape-anchored and robust against standard-form
+  variance — whitespace, short-flag bundling/reordering (`-qf`, `-fr`), long- vs short-flag spelling,
+  force-via-`+`refspec — but cannot see through a command routed via a non-shell wrapper (a Python
+  `subprocess` call, a git alias, a base64-decoded script), which never produces the literal
+  substrings the matcher looks for.
 - **Secret redaction** — `agents_never_sleep/redact.py` strips keys/tokens/connection-string passwords from
   logs and reports. The acceptance suite (`acceptance/test_redact.py`, `test_keysource.py`) uses
   **fake fixtures only** — no real credentials exist anywhere in this repo.

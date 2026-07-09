@@ -21,6 +21,8 @@ import os
 import shlex
 import subprocess
 
+from .redact import known_secret_env_var_names
+
 
 class GateResult(str, enum.Enum):
     PASS = "PASS"
@@ -52,6 +54,16 @@ _NONINTERACTIVE_ENV = {
 
 def _run_command(command: list[str], cwd: str, timeout: int) -> tuple[int, str, bool]:
     env = dict(os.environ)
+    # L2 (post-audit): a `vault:`/`env:` token-ref's whole point is keeping the key OUT of the
+    # environment; `run.py` resolves it back into os.environ for its own in-process consumers
+    # (onboarding gate, council), but the GATE COMMAND is the target repo's own (arbitrary,
+    # untrusted) test/build command — it has no legitimate need to inherit ANS's own gateway keys,
+    # and widening what it can see only widens what a compromised/careless gate could leak. Strip
+    # ANS's own resolved-credential env vars here, at the one place they'd otherwise leak into a
+    # spawned subprocess; resolved-but-unknown-named secrets stay covered by redact.py at the
+    # output boundary regardless.
+    for name in known_secret_env_var_names():
+        env.pop(name, None)
     env.update(_NONINTERACTIVE_ENV)
     try:
         proc = subprocess.run(

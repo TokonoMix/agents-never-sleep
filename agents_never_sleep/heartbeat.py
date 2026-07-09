@@ -13,13 +13,15 @@ import os
 import tempfile
 import time
 
+from .fsutil import ensure_private_dir
+
 
 class Heartbeat:
     def __init__(self, path: str, clock=time.time):
         self.path = path
         self._clock = clock
         self._n = 0
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
 
     def beat(self, ticket_id: str = "", phase: str = "") -> None:
         self._n += 1
