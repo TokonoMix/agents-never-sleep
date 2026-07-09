@@ -79,9 +79,12 @@ def default_config(profile) -> dict:
             # unattended-no-config is conservative: non-destructive only until a human configures
             "non_destructive_only": True,
             "requirement_ambiguity": "hybrid",   # hybrid | park | assume
-            # G4a live-tree isolation gate: what to do when a fresh run starts UNISOLATED (primary
-            # worktree) in a DIRTY shared tree. warn (default, non-breaking: report + stderr, run
-            # continues) | ack (operator acknowledged, silent) | require_isolation (HALT at start).
+            # Live-tree isolation policy for a fresh run in the primary (non-worktree) tree:
+            #   warn (default) — report + stderr when the tree is dirty; run continues (non-breaking)
+            #   ack            — operator acknowledged in-place is intended; silent
+            #   require_isolation — HALT at start if unisolated + dirty (G4a)
+            #   auto_worktree  — the launcher runs the session in a dedicated external git worktree so
+            #                    the primary tree is never touched (G4b; detached runs only, not --fg)
             "live_tree": "warn",
             # Parked-WIP protection (INT-1735): before the run, stash these TRACKED parked paths and
             # fence these untracked THROWAWAY globs into .git/info/exclude so the `git add -A`

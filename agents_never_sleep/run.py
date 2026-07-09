@@ -37,6 +37,15 @@ from .preflight import run_preflight, write_profile
 from .report import build_report
 from .state import OutcomeStore
 from .tickets import load_tickets
+def _resolve_report_path(repo: str, config: dict, args_report: str) -> str:
+    """The morning-report path. `UE_REPORT_PATH` (an absolute path) wins — the G4b launcher sets it
+    to the PRIMARY tree when a run is isolated in a worktree, so the report (ANS's central deliverable)
+    survives worktree cleanup instead of vanishing with it. Mirrors the UE_HEARTBEAT override. Absent,
+    it is the config's report.local_path (or --report) joined to the repo, as before."""
+    return os.environ.get("UE_REPORT_PATH") or os.path.join(
+        repo, (config.get("report", {}) or {}).get("local_path", args_report))
+
+
 def _unattended() -> bool:
     return bool(os.environ.get("CLAUDE_UNATTENDED")) or not sys.stdin.isatty()
 
@@ -198,8 +207,7 @@ class _Context:
         self.ledger = AttemptLedger(os.path.join(self.state_dir, "ledger.json"))
         self.heartbeat = Heartbeat(os.environ.get("UE_HEARTBEAT")
                                    or os.path.join(self.state_dir, "heartbeat.json"))
-        self.report_path = os.path.join(
-            self.repo, self.config.get("report", {}).get("local_path", args.report))
+        self.report_path = _resolve_report_path(self.repo, self.config, args.report)
 
         # Protect the harness's own dirs from being committed/reverted by the reversibility layer.
         protect = {".unattended"}

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -74,6 +75,115 @@ DEFAULT_LAUNCHER = {
 }
 # Safety cap on the fresh-session respawn loop, so a stuck sentinel can never spin forever.
 SESSION_RESPAWN_CAP = 500
+
+# ---- G4b: auto-worktree isolation (launcher-owned lifecycle) ----------------------------------
+# When autonomy.live_tree == "auto_worktree", the launcher runs the whole session inside a dedicated
+# EXTERNAL `git worktree` so the primary/live tree is never touched. driver/vcs are UNCHANGED — they
+# already run correctly in a linked worktree, and isolation propagates via cwd inheritance to every
+# re-invoked `ans next`/`ans complete`. The run's `ans/run-*` branch lives in the shared object store,
+# so it survives worktree cleanup and stays mergeable from the primary tree.
+
+WORKTREE_MIN_FREE_MB = 200  # refuse (HALT) rather than create a worktree with too little free disk
+
+
+class WorktreeError(Exception):
+    """Creating the isolated worktree failed. The caller HALTs — it must NEVER silently fall back to
+    running in-place, which would reintroduce the shared-live-tree hazard auto_worktree exists to avoid."""
+
+
+def _wt_git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=60)
+
+
+def _is_linked_worktree(repo: str) -> bool:
+    """True if `repo` is a LINKED worktree (per-worktree git dir != shared common dir); False for the
+    primary tree or on any git error (conservative: don't treat an unknown state as already-isolated)."""
+    gd = _wt_git(repo, "rev-parse", "--git-dir")
+    cd = _wt_git(repo, "rev-parse", "--git-common-dir")
+    if gd.returncode != 0 or cd.returncode != 0:
+        return False
+
+    def _abs(p: str) -> str:
+        p = p.strip()
+        return p if os.path.isabs(p) else os.path.join(repo, p)
+    return os.path.realpath(_abs(gd.stdout)) != os.path.realpath(_abs(cd.stdout))
+
+
+def ans_worktree_root(primary_repo: str) -> str:
+    """The EXTERNAL directory (never nested under the primary tree) that holds this repo's isolated
+    worktrees. Keyed by a hash of the primary's realpath so two repos sharing a basename don't
+    collide, and so it survives a `.unattended` wipe."""
+    rp = os.path.realpath(primary_repo)
+    h = hashlib.sha1(rp.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(os.path.dirname(rp), ".ans-worktrees", f"{os.path.basename(rp)}-{h}")
+
+
+def should_isolate(ans_config: dict, primary_repo: str) -> bool:
+    """True iff autonomy.live_tree == 'auto_worktree' AND the target is not already a linked worktree
+    (never nest). Deliberately NOT gated on 'dirty': the concurrency hazard is ongoing and the operator
+    opted in explicitly."""
+    if ((ans_config or {}).get("autonomy", {}) or {}).get("live_tree") != "auto_worktree":
+        return False
+    return not _is_linked_worktree(primary_repo)
+
+
+def _remove_worktrees_under(primary_repo: str, root: str) -> None:
+    """Force-remove every git-registered worktree whose path is under `root`, then prune admin entries.
+    Best-effort — a leftover from a crash must not block a fresh run."""
+    r = _wt_git(primary_repo, "worktree", "list", "--porcelain")
+    if r.returncode == 0:
+        rootrp = os.path.realpath(root)
+        for line in r.stdout.splitlines():
+            if line.startswith("worktree "):
+                p = line[len("worktree "):].strip()
+                prp = os.path.realpath(p)
+                if prp == rootrp or prp.startswith(rootrp + os.sep):
+                    _wt_git(primary_repo, "worktree", "remove", "--force", p)
+    _wt_git(primary_repo, "worktree", "prune")
+
+
+def create_isolated_worktree(primary_repo: str, stamp: str) -> str:
+    """Create a FRESH detached worktree under the external root and return its path. Always fresh:
+    any leftover ANS worktree for this repo is force-removed first (the run branch, which lives in the
+    shared store, is untouched). Raises WorktreeError on failure so the caller HALTs (never in-place)."""
+    root = ans_worktree_root(primary_repo)
+    _remove_worktrees_under(primary_repo, root)
+    shutil.rmtree(root, ignore_errors=True)  # nuke any residue (hand-deleted admin, orphan dirs)
+    parent = os.path.dirname(root)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        if shutil.disk_usage(parent).free < WORKTREE_MIN_FREE_MB * 1024 * 1024:
+            raise WorktreeError(
+                f"insufficient free disk (<{WORKTREE_MIN_FREE_MB} MB) for an isolated worktree at {parent}")
+    except OSError:
+        pass  # can't measure -> proceed; `worktree add` will fail loudly if the fs is truly unusable
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, f"run-{stamp}")
+    # --detach: avoids the "branch already checked out in the primary" refusal and handles a detached
+    # primary HEAD; the driver then creates its own ans/run-* inside the worktree exactly as usual.
+    r = _wt_git(primary_repo, "worktree", "add", "--detach", path, "HEAD")
+    if r.returncode != 0:
+        raise WorktreeError(f"git worktree add failed: {(r.stderr or r.stdout).strip()}")
+    return path
+
+
+def cleanup_isolated_worktree(primary_repo: str, worktree_path: str) -> bool:
+    """Remove the isolated worktree on a normal terminal. Returns True if it is gone, False if it was
+    left in place (removal refused for a reason other than the expected untracked-.unattended dirt —
+    then we do NOT destroy possible evidence). The ans/run-* branch is never touched: it lives in the
+    shared store and is the operator's to merge."""
+    try:
+        if os.path.realpath(os.getcwd()).startswith(os.path.realpath(worktree_path)):
+            os.chdir(primary_repo)  # can't remove the cwd on some platforms
+    except OSError:
+        pass
+    # --force is REQUIRED: the untracked .unattended/ state dir makes the worktree "dirty" and a plain
+    # `remove` would refuse — the #1 worktree-leak source.
+    r = _wt_git(primary_repo, "worktree", "remove", "--force", worktree_path)
+    _wt_git(primary_repo, "worktree", "prune")
+    if r.returncode != 0 and os.path.exists(worktree_path):
+        return False
+    return True
 # Probed when credentials_paths is not configured. Absence is a WARNING only: platforms
 # like macOS keep Claude Code credentials in the keychain, and API-key setups have no file.
 DEFAULT_CREDENTIAL_PROBES = ["~/.claude/.credentials.json"]
@@ -645,7 +755,7 @@ def open_log(repo: str, cfg: dict) -> str:
 
 
 def run_fresh_session_loop(repo, cfg, full_argv, child_env, fresh_n, lock_fd, release,
-                           preset_name) -> int:
+                           preset_name, log_repo=None) -> int:
     """Opt-in context strategy: instead of ONE long accumulating agent session, spawn a FRESH
     agent every N completed tickets so a long backlog doesn't degrade as one session.
 
@@ -679,7 +789,7 @@ def run_fresh_session_loop(repo, cfg, full_argv, child_env, fresh_n, lock_fd, re
     if full_argv:
         full_argv[-1] = full_argv[-1] + budget_note
 
-    log_path = open_log(repo, cfg)
+    log_path = open_log(log_repo or repo, cfg)  # logs land on the primary when isolated (log_repo)
     print(f"Fresh-session mode: respawn every {fresh_n} ticket(s), preset '{preset_name}' "
           f"(supervisor in foreground; lock held for the whole loop)")
     print(f"  log:   {log_path}")
@@ -874,6 +984,40 @@ def main() -> int:
 
     full_argv = agent_argv + args.prompt
 
+    # G4b: auto-worktree isolation. When autonomy.live_tree == "auto_worktree", run the whole session
+    # in a dedicated EXTERNAL git worktree so the primary/live tree is never touched. The lock stays
+    # on the PRIMARY repo (already held); state/sentinel/heartbeat become worktree-relative via the
+    # rebind + chdir below, and every re-invoked `ans next`/`ans complete` inherits cwd. Not applied
+    # under --fg: exec replaces this process, leaving no place to clean up.
+    primary_repo = repo
+    worktree = None
+    if should_isolate(full_config, primary_repo):
+        if args.fg:
+            # Fail-closed (matches the doctrine below): the operator asked for isolation, so running
+            # unisolated in the live tree is exactly the hazard to avoid. --fg execs THIS process into
+            # the agent (foreground), so we refuse rather than run in-place.
+            _release()
+            print("== NO-GO: auto_worktree is not supported under --fg — run detached (drop --fg), "
+                  "or unset autonomy.live_tree=auto_worktree ==", file=sys.stderr)
+            return EX_NOGO
+        try:
+            worktree = create_isolated_worktree(
+                primary_repo, f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}")
+        except WorktreeError as exc:
+            _release()
+            print(f"== NO-GO: auto_worktree requested but isolation failed: {exc} ==",
+                  file=sys.stderr)
+            return EX_NOGO  # fail-closed: NEVER fall back to running in the live tree
+        os.chdir(worktree)
+        repo = worktree  # run-local state/heartbeat/sentinel become worktree-scoped (isolated)
+        # But the morning report is ANS's DELIVERABLE — pin it to the PRIMARY tree so it survives the
+        # worktree's removal (the driver honors UE_REPORT_PATH). Logs likewise go to the primary
+        # (open_log below), so the operator finds both where they expect them.
+        report_name = (full_config.get("report") or {}).get("local_path") or "night-report.md"
+        child_env["UE_REPORT_PATH"] = os.path.join(primary_repo, report_name)
+        print(f"  isolated: session runs in a dedicated git worktree — {worktree}")
+        print(f"  report:   {child_env['UE_REPORT_PATH']} (kept on your primary tree)")
+
     if args.fg:
         # exec: this process BECOMES the agent; the inherited FD keeps the lock held for
         # the whole run (os.open sets CLOEXEC per PEP 446, so flip inheritable explicitly)
@@ -897,8 +1041,17 @@ def main() -> int:
     except (TypeError, ValueError):
         fresh_n = 0
     if fresh_n > 0:
-        return run_fresh_session_loop(
-            repo, cfg, full_argv, child_env, fresh_n, lock_fd, _release, preset_name)
+        # This supervisor BLOCKS until the backlog drains, so it is safe to clean up the isolated
+        # worktree in a finally here (the run is genuinely over on return). The ans/run-* branch lives
+        # in the shared store and survives.
+        try:
+            return run_fresh_session_loop(
+                repo, cfg, full_argv, child_env, fresh_n, lock_fd, _release, preset_name,
+                log_repo=primary_repo if worktree is not None else None)
+        finally:
+            if worktree is not None and not cleanup_isolated_worktree(primary_repo, worktree):
+                print(f"ans-run: isolated worktree left in place for inspection: {worktree}",
+                      file=sys.stderr)
 
     # Wrap the detached launch in the heartbeat watchdog by default (ticket 03): a bare
     # `claude -p` has NO external restart, so a sustained 529/overload wave that FREEZES the
@@ -925,7 +1078,9 @@ def main() -> int:
         if skill_root not in parts:
             child_env["PYTHONPATH"] = os.pathsep.join([skill_root, *parts])
 
-    log_path = open_log(repo, cfg)
+    # Logs go to the PRIMARY when isolated, so they outlive the worktree (which the next launch
+    # reclaims); state/heartbeat stay worktree-scoped via `repo`.
+    log_path = open_log(primary_repo if worktree is not None else repo, cfg)
     # 0600: the agent's raw, UNREDACTED stream may contain a resolved gateway key — never
     # world-readable. fchmod tightens it even if the file pre-existed looser. O_NOFOLLOW (L4,
     # post-audit): a pre-planted symlink at log_path must not redirect that unredacted write to
@@ -965,6 +1120,11 @@ def main() -> int:
               "lock held by the run process; watchdog OFF)")
     print(f"  log:   {log_path}")
     print(f"  watch: tail -f {log_path}")
+    if worktree is not None:
+        # A detached run outlives this process, so we cannot remove its worktree here (it is still in
+        # use). It is force-removed and recreated fresh on the next auto_worktree launch — bounded to
+        # one stale tree. The run's ans/run-* branch is in the shared store, mergeable from primary.
+        print(f"  isolated worktree: {worktree} (reclaimed on the next auto_worktree launch)")
     return 0
 
 
