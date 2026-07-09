@@ -79,6 +79,10 @@ def default_config(profile) -> dict:
             # unattended-no-config is conservative: non-destructive only until a human configures
             "non_destructive_only": True,
             "requirement_ambiguity": "hybrid",   # hybrid | park | assume
+            # G4a live-tree isolation gate: what to do when a fresh run starts UNISOLATED (primary
+            # worktree) in a DIRTY shared tree. warn (default, non-breaking: report + stderr, run
+            # continues) | ack (operator acknowledged, silent) | require_isolation (HALT at start).
+            "live_tree": "warn",
             # Parked-WIP protection (INT-1735): before the run, stash these TRACKED parked paths and
             # fence these untracked THROWAWAY globs into .git/info/exclude so the `git add -A`
             # snapshot never commits intentional WIP; restored after a terminal signal. Default off.

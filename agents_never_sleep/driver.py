@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import time
 
@@ -41,6 +42,26 @@ class RunResumeUnsafe(Exception):
     vanished. Raised — deliberately NOT a GitError, so the `_enter_run_branch` degrade-catch does not
     swallow it — to force a LOUD HALT (non-zero exit, run-branch.json left intact for inspection)
     instead of a silent checkout that would move HEAD off live commits and delete untracked files."""
+
+
+def live_tree_decision(is_linked: bool, is_clean: bool, policy) -> str:
+    """Pure policy for the G4a live-tree isolation gate. Returns 'ok' | 'warn' | 'halt'.
+
+    Risk = running UNISOLATED (the primary worktree, not a linked `git worktree`) in a tree that
+    still has clobberable live state (not clean). No risk → 'ok' for every policy. On risk:
+    'ack' → 'ok' (operator acknowledged), 'require_isolation' → 'halt', anything else (the default
+    'warn', or a missing/unknown value) → 'warn'."""
+    risk = (not is_linked) and (not is_clean)
+    if not risk:
+        return "ok"
+    # Normalize so a case/format variant of a policy fails SAFE, not open: without this,
+    # "Require_Isolation" would fall through to warn (proceed) when the operator demanded a HALT.
+    p = policy.strip().lower() if isinstance(policy, str) else ""
+    if p == "ack":
+        return "ok"
+    if p == "require_isolation":
+        return "halt"
+    return "warn"
 
 
 def _atomic_write_json(path: str, data: dict) -> None:
@@ -354,6 +375,45 @@ class StepDriver:
         except OSError:
             pass
 
+    _LIVE_TREE_MSG = (
+        "running UNISOLATED in a live shared working tree that has uncommitted/untracked changes — "
+        "the harness's snapshots and reverts act on that live state, so a revert can discard a "
+        "human's work. Run inside a `git worktree`, or set `autonomy.live_tree: ack` to acknowledge.")
+
+    def _live_tree_gate(self):
+        """G4a fresh-run isolation check. Returns a terminal dict to return (HALT) or None to
+        continue. On 'warn' persists a note (so the terminal report — a later process — can surface
+        it) and prints to stderr; on 'ack'/'ok' clears any stale note. Best-effort: a git error here
+        does NOT block (the run-branch layer's own degrade path handles an unhealthy git)."""
+        git = self.orch.git
+        # Drop any stale note from a prior run FIRST, so a GitError below (git unhealthy → we cannot
+        # re-evaluate) never leaves an old warning to be surfaced by this run's terminal report.
+        note_path = os.path.join(self.state_dir, "live-tree-note")
+        try:
+            os.unlink(note_path)
+        except OSError:
+            pass
+        try:
+            # Measure HUMAN dirt only: exclude the harness's own paths (self.protect, e.g. .unattended),
+            # which are untracked here because ensure_safety_net has not gitignored them yet — counting
+            # them would false-positive a pristine tree (spurious warn, or a spurious HALT).
+            decision = live_tree_decision(
+                git.is_linked_worktree(), git.is_clean(exclude=git.protect),
+                (self.config.get("autonomy", {}) or {}).get("live_tree", "warn"))
+        except GitError:
+            return None
+        if decision == "halt":
+            return self._terminate("HALTED", reason="live-tree isolation required: " + self._LIVE_TREE_MSG)
+        if decision == "warn":
+            try:
+                os.makedirs(self.state_dir, exist_ok=True)
+                with open(note_path, "w", encoding="utf-8") as fh:
+                    fh.write(self._LIVE_TREE_MSG)
+            except OSError:
+                pass
+            print(f"[agents-never-sleep] WARNING: {self._LIVE_TREE_MSG}", file=sys.stderr)
+        return None
+
     def _enter_run_branch(self) -> None:
         """Ensure the harness is ON its dedicated run branch before any snapshot/commit/revert.
 
@@ -649,6 +709,14 @@ class StepDriver:
         od = onboarding.directive(self.config, interactive=not self.orch.unattended)
         if od and od.get("action") == "degraded":
             notes.append(od["blind_spot"])
+        # G4a: a live-tree warning was raised at run start (a different process) — surface it here.
+        note_path = os.path.join(self.state_dir, "live-tree-note")
+        if os.path.exists(note_path):
+            try:
+                with open(note_path, encoding="utf-8") as fh:
+                    notes.append("LIVE-TREE: " + fh.read().strip())
+            except OSError:
+                pass
         done = sum(1 for o in outcomes if o.state.value.startswith("DONE"))
         stop_notes = list(notes)
         if status == "STOPPED_CREDITS":
@@ -715,11 +783,21 @@ class StepDriver:
         each council — the harness owns the policy (PROCEED/DEGRADE/STOP), never the agent.
         """
         self._beat("schedule")
+        # A fresh run (no sentinel yet, nothing in flight) clears the per-run "set aside" list so a
+        # new resume retries the tickets a prior run set aside. A continuing run keeps it. Loaded
+        # early so the G4a gate below can run before ensure_safety_net.
+        pending = self._load_pending()
+        # Live-tree isolation gate (G4a): at a FRESH run start with work to do, apply
+        # autonomy.live_tree (warn|ack|require_isolation). Measure BEFORE ensure_safety_net (which
+        # writes .gitignore and would dirty a clean tree, false-positiving the check) and before any
+        # run branch — require_isolation returns a HALT here, nothing has been mutated yet.
+        if (self.tickets and pending is None and not os.path.exists(self.sentinel_path)
+                and self.orch.git.is_repo()):
+            halted = self._live_tree_gate()
+            if halted is not None:
+                return halted
         has_net = self.orch.git.ensure_safety_net()
 
-        # A fresh run (no sentinel yet, nothing in flight) clears the per-run "set aside" list so a
-        # new resume retries the tickets a prior run set aside. A continuing run keeps it.
-        pending = self._load_pending()
         # Join the dedicated run branch BEFORE the crash-recovery revert below — otherwise the
         # recovery would reset the operator's branch tree (INT-1825 bug 2). Only when there is work
         # context (tickets to do, or a run already in flight); an empty backlog terminates untouched.
