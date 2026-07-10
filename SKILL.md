@@ -540,6 +540,34 @@ F5 makes its own, cheaper single-call tokonomix requests and is throttled by its
 per-run ceiling — separate from the council's `€`/call budget, so a PARK-heavy backlog can never
 silently spend the council's night budget.
 
+### Grounding a consensus call (large context)
+
+Before running an F5/consensus grounding, ground it instead of inlining raw context blind:
+
+1. **Probe context-upload availability.** Treat any not-enabled response or error from the probe as
+   unavailable — never assume it's on.
+2. **Plan the grounding.** Call `plan_grounding(repo_context, upload_available=<probe result>)`,
+   passing `repo_context` **critical-evidence first** — the function may truncate or route based on
+   order, so lead with what the verdict actually depends on.
+3. **Execute the returned plan verbatim — do not re-estimate or re-decide.** The plan already made
+   the inline/upload/degrade call; second-guessing it here defeats the point:
+   - `mode: "inline"` → send the context as today, no upload step.
+   - `mode: "upload"` → call `tokonomix_upload(plan_to_upload_args(plan))`, then pass the returned
+     `context: {session, handles}` to `tokonomix_consensus_ask` alongside a lean prompt (the bulk of
+     the evidence now lives in the uploaded session, not the prompt body).
+   - `mode: "degraded"` → do not call the council at all. Report an
+     `ungrounded-consensus-unavailable` verdict (`resolved=False` → `KEEP_PARKED`) rather than sending
+     an ungrounded or truncated context.
+4. **Fail open at BOTH network steps, not just the probe.** If `tokonomix_upload` OR the follow-up
+   `tokonomix_consensus_ask(context=…)` itself reports disabled/errors — e.g. the global upload flag
+   flips off between the two calls, and the second call rejects the now-stale handles — treat that
+   the same as a `degraded` plan: degrade, do **not** fall back to inlining an over-budget context.
+   Best-effort log the orphaned upload session id so it isn't silently lost.
+5. **Unattended has no cost policy of its own**, so a grounding failure must fail closed to
+   `degraded` and never block the loop — get a pre-flight cost estimate before spending, and prefer
+   `verbatim=False` for the non-critical remainder of the context (every proposer and the judge each
+   bill the full pack, so trimming the non-critical portion multiplies savings across the call).
+
 ## Portability
 
 This is the open `SKILL.md` standard — it runs in Claude Code, Codex, Gemini CLI, Copilot, Cursor
