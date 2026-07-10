@@ -43,6 +43,18 @@ def test_module_imports_pure_in_clean_subprocess():
     assert r.returncode == 0, r.stderr
     assert "IMPORT_OK" in r.stdout
 
+def test_config_has_consensus_context_defaults():
+    from agents_never_sleep import config as cfgmod
+    class _Profile:
+        has_tokonomix = False
+        gates = []
+    cfg = cfgmod.default_config(_Profile())
+    import json
+    blob = json.dumps(cfg)
+    assert "consensus_context_cap_tokens" in blob
+    assert "consensus_context_route_margin" in blob
+    assert "consensus_context_upload" in blob
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):

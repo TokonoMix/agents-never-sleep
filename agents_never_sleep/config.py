@@ -118,6 +118,11 @@ def default_config(profile) -> dict:
                 "gemini-2.5-pro": [125, 1000], "deepseek/deepseek-v3.2": [25, 38],
                 "meta-llama/llama-4-maverick": [15, 60], "claude-sonnet-4-6": [300, 1500]},
             "est_prompt_tokens": 3000,
+            # Consensus-context grounding routing (F5 gate): how much verbatim context a
+            # consensus call may carry, and when to switch from inline to file-upload.
+            "consensus_context_cap_tokens": 32000,
+            "consensus_context_route_margin": 24000,
+            "consensus_context_upload": "auto",   # auto = probe+degrade; off = force inline / never upload
         },
         # Specialist review lenses (architect + security default; conditional ones added per-diff).
         # The agent runs each via tokonomix; a security/architect/tenant concern -> daylight review.
