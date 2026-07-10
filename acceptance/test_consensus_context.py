@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from agents_never_sleep.consensus_context import (
     estimate_tokens, plan_grounding, GroundingPlan, plan_to_upload_args, VERBATIM_BYTES
@@ -34,6 +35,13 @@ def test_plan_to_upload_args_shape():
     args = plan_to_upload_args(p)
     assert set(args.keys()) == {"files"}
     assert all(set(f) == {"content", "verbatim"} for f in args["files"])
+
+def test_module_imports_pure_in_clean_subprocess():
+    code = ("import agents_never_sleep.consensus_context as m;"
+            "assert hasattr(m,'plan_grounding');print('IMPORT_OK')")
+    r = subprocess.run(["python3", "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "IMPORT_OK" in r.stdout
 
 def _run():
     fails = 0
