@@ -13,6 +13,16 @@ def estimate_tokens(text: str) -> int:
     """chars/4 estimate; the server re-measures authoritatively."""
     return len(text) // 4
 
+def _split_verbatim(repo_context: str) -> list:
+    """Caller-directed: the caller passes repo_context critical-evidence-FIRST. Head up to
+    VERBATIM_BYTES stays verbatim; the remainder is digest-eligible."""
+    head = repo_context[:VERBATIM_BYTES]
+    rest = repo_context[VERBATIM_BYTES:]
+    files = [{"content": head, "verbatim": True}]
+    if rest:
+        files.append({"content": rest, "verbatim": False})
+    return files
+
 @dataclasses.dataclass
 class GroundingPlan:
     mode: str                 # "inline" | "upload" | "degraded"
@@ -26,4 +36,9 @@ def plan_grounding(repo_context: str, *, cap_tokens: int = DEFAULT_CAP_TOKENS,
     if not upload_available:
         return GroundingPlan(mode="degraded",
                              reason="over margin and context-upload unavailable")
-    return GroundingPlan(mode="upload", reason="over margin, upload available")
+    return GroundingPlan(mode="upload", files=_split_verbatim(repo_context),
+                         reason="over margin, upload available")
+
+def plan_to_upload_args(plan: "GroundingPlan") -> dict:
+    """Exact tokonomix_upload({files}) argument dict — the agent passes this through verbatim."""
+    return {"files": [{"content": f["content"], "verbatim": f["verbatim"]} for f in plan.files]}
