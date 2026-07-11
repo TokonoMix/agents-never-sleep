@@ -26,7 +26,7 @@ import os
 import sys
 
 from . import config
-from .config import ensure_config, load_config
+from .config import config_needs_confirmation, ensure_config, load_config, reactivate_pending_onboard
 from .driver import RunResumeUnsafe, StepDriver
 from .gates import GateRunner
 from .heartbeat import Heartbeat
@@ -85,7 +85,7 @@ def _register_creds_file_key() -> None:
 class _Context:
     """Everything a subcommand needs, built once from args (preflight is cached on disk)."""
 
-    def __init__(self, args):
+    def __init__(self, args, readonly=False):
         # Each next/complete is a fresh process, so harvest known-credential env values into the
         # redaction registry on every entry (the pattern matcher is the backstop; pattern-less
         # values like a Vault secret depend entirely on this).
@@ -100,9 +100,20 @@ class _Context:
         # Preflight (git probes + a Paperclip socket probe) only needs to run when there is no
         # saved config yet — its sole consumer is config creation. On every later next/complete a
         # saved config exists, so skip it rather than re-probing the environment each call.
+        self.config_warning = None
         existing = load_config(self.repo)
         if existing is not None:
             self.config = existing
+            if readonly:
+                # `report` is a read op: never let the pending_onboard reactivation write hit the
+                # config as a side effect — surface the unconfirmed state as a warning instead.
+                if config_needs_confirmation(existing):
+                    self.config_warning = (
+                        "config at .claude/agents-never-sleep.json is unconfirmed (wizard "
+                        "defaults and/or a pending keyless-onboard reactivation) — run the "
+                        "wizard interactively to confirm")
+            else:
+                reactivate_pending_onboard(self.repo, existing)
         else:
             profile = run_preflight(self.repo, unattended=self.unattended)
             write_profile(profile, os.path.join(self.state_dir, "capability-profile.json"))
@@ -486,7 +497,7 @@ def _agent_hint_kwargs(ctx) -> dict:
 
 
 def cmd_report(args) -> int:
-    ctx = _Context(args)
+    ctx = _Context(args, readonly=True)
     from .vcs import Git, GitError
     try:
         backup_refs = Git(ctx.repo).list_backup_refs()
@@ -497,6 +508,8 @@ def cmd_report(args) -> int:
     with open(ctx.report_path, "w", encoding="utf-8") as fh:
         fh.write(report)
     out = {"status": "REPORT_WRITTEN", "report_path": ctx.report_path}
+    if ctx.config_warning:
+        out["config_warning"] = ctx.config_warning
     summary = _push_paperclip(ctx)
     if summary is not None:
         out["paperclip"] = summary
