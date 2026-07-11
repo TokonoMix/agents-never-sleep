@@ -558,8 +558,10 @@ Five minutes from zero to a first unattended run.
    ```
 
 5. **Integrate / go unattended:** install the Claude Code enforcement hooks (opt-in, `hooks/README.md`)
-   so the contract is enforced structurally, then launch detached through `ans-run` (§10). For other
-   platforms, see `hooks/platforms/README.md`.
+   so the contract is enforced structurally, then launch detached through `ans-run` (§10). **Before your
+   first real launch, run `ans-run --check`** — it never starts a run or spends a token, it just prints
+   the GO/NO-GO preflight report so you can see what would happen. For other platforms, see
+   `hooks/platforms/README.md`.
 6. **Read the run report** (`python3 -m agents_never_sleep.run report --repo .`): done & trusted,
    needs-daylight-review, parked, blocked, blind spots.
 
@@ -600,12 +602,17 @@ Add a token-bucket rate limiter to POST /api/submit. 100 req/min per key.
 Reject over-limit with HTTP 429 + Retry-After. Cover it with tests.
 ```
 
-Launch a detached, headless run through the preflight launcher (installed as `ans-run`):
+Launch a detached, headless run through the preflight launcher (installed as `ans-run`). **Dry-run
+first, always safe** — `--check` never starts a run, never touches the working tree, never spends a
+token:
 
 ```bash
+ans-run --repo /path/to/project --check          # preflight report only — see what would happen
+# → == GO ==   (or == NO-GO: … ==, telling you exactly what to fix)
+
 ans-run --repo /path/to/project --agent claude "work through the backlog unattended"
 #   GO/NO-GO preflight runs BEFORE any token is spent; one winner per working tree.
-ans-run --repo /path/to/project --check          # preflight report only; never starts/disturbs a run
+#   Prompts for confirmation before it launches (skip with --yes for CI/automation).
 ```
 
 Self-test the harness (hermetic, no credentials, no network):
@@ -653,7 +660,9 @@ PARK) and a pre-flight that a model + key are configured. It is built-to-contrac
 to the standard of the hook-enforced platforms.
 
 **CI/CD:** run `ans-run` as a step (or the `next`/`complete` loop directly) as the job's user; gate on
-`ans-run --check`; the working-tree flock makes concurrent jobs safe.
+`ans-run --check`; the working-tree flock makes concurrent jobs safe. The pre-launch confirmation prompt
+only triggers on an interactive terminal (stdin is a tty), so CI runs need no extra flag — pass `--yes`
+explicitly if you want to guarantee it's skipped regardless.
 
 ### Enforcement capability matrix
 

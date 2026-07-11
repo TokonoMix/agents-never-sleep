@@ -73,7 +73,8 @@ def _run(repo: str, *extra: str, timeout: int = 30) -> subprocess.CompletedProce
     env["ANS_TRUST_STORE"] = TRUST_STORE
     env["ANS_TEST_MODE"] = "1"
     return subprocess.run([sys.executable, ANS_RUN, "--repo", repo, *extra],
-                          capture_output=True, text=True, timeout=timeout, env=env)
+                          capture_output=True, text=True, timeout=timeout, env=env,
+                          stdin=subprocess.DEVNULL)
 
 
 def _trusted_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
@@ -108,7 +109,8 @@ def test_default_off_single_spawn(failures):
     repo = _trusted_repo(RECORDER)  # no fresh_session_every => default 0 => off
     env = dict(os.environ, ANS_TRUST_STORE=TRUST_STORE, ANS_TEST_MODE="1", REPO=repo)
     res = subprocess.run([sys.executable, ANS_RUN, "--repo", repo, "go"],
-                         capture_output=True, text=True, timeout=30, env=env)
+                         capture_output=True, text=True, timeout=30, env=env,
+                         stdin=subprocess.DEVNULL)
     if res.returncode != 0:
         failures.append(f"[off] expected rc 0, got {res.returncode}: {res.stdout}{res.stderr}")
         return
@@ -342,7 +344,8 @@ def test_on_respawns_until_terminal(failures):
 
     env = dict(os.environ, ANS_TRUST_STORE=TRUST_STORE, ANS_TEST_MODE="1", REPO=repo)
     res = subprocess.run([sys.executable, ANS_RUN, "--repo", repo, "go"],
-                         capture_output=True, text=True, timeout=60, env=env)
+                         capture_output=True, text=True, timeout=60, env=env,
+                         stdin=subprocess.DEVNULL)
     if res.returncode != 0:
         failures.append(f"[on] expected rc 0, got {res.returncode}: {res.stdout}{res.stderr}")
         return

@@ -80,7 +80,8 @@ def _run(repo: str, *extra: str, timeout: int = 30,
     env["ANS_TEST_MODE"] = "1"  # the store override is only honored under the test flag
     env.update(env_extra or {})
     return subprocess.run([sys.executable, ANS_RUN, "--repo", repo, *extra],
-                          capture_output=True, text=True, timeout=timeout, env=env)
+                          capture_output=True, text=True, timeout=timeout, env=env,
+                          stdin=subprocess.DEVNULL)
 
 
 def _trusted_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
@@ -458,7 +459,8 @@ def test_fg_propagates_rc_and_holds_lock(failures):
     repo2 = _trusted_repo(SLEEPER)
     env = dict(os.environ); env["ANS_TRUST_STORE"] = TRUST_STORE; env["ANS_TEST_MODE"] = "1"
     fg = subprocess.Popen([sys.executable, ANS_RUN, "--repo", repo2, "--fg", "go"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=env)
+                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=env,
+                          stdin=subprocess.DEVNULL)
     time.sleep(1.5)  # let preflight finish and the exec happen
     res2 = _run(repo2, "again")
     if res2.returncode != EX_BUSY:
@@ -478,7 +480,7 @@ def test_simultaneous_starts_exactly_one_wins(failures):
     # the mutual-exclusion guarantee itself is watchdog-independent (lock taken in preflight).
     procs = [subprocess.Popen([sys.executable, ANS_RUN, "--repo", repo, "--no-watchdog", "go"],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                              env=env)
+                              env=env, stdin=subprocess.DEVNULL)
              for _ in range(2)]
     codes = [p.wait(timeout=30) for p in procs]
     if sorted(codes) != [0, EX_BUSY]:

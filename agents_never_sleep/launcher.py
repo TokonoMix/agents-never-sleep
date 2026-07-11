@@ -864,7 +864,12 @@ def main() -> int:
     parser.add_argument("--no-watchdog", action="store_true",
                         help="do NOT wrap the background launch in the heartbeat watchdog "
                              "(default: wrapped, so a hang/overload restarts the run resumable)")
-    parser.add_argument("--check", action="store_true", help="preflight report only")
+    parser.add_argument("--check", action="store_true",
+                        help="dry run: print the GO/NO-GO preflight report and exit — "
+                             "never starts a run, never touches the working tree, never spends a token")
+    parser.add_argument("--yes", action="store_true",
+                        help="skip the pre-launch confirmation prompt (for CI/automation; the prompt "
+                             "is also skipped automatically when stdin isn't a terminal)")
     parser.add_argument("--trust", action="store_true",
                         help="record trust for the repo's current config and exit")
     parser.add_argument("prompt", nargs="*", help="prompt passed to the agent CLI")
@@ -952,6 +957,23 @@ def main() -> int:
         _release()
         print("ans-run: no prompt given", file=sys.stderr)
         return EX_NOGO
+
+    # Preflight passed and we're about to spend tokens: give a nervous first-time operator one last
+    # look before it commits. Gated on isatty so a detached/CI/cron launch (no controlling terminal)
+    # never blocks waiting for input; --yes skips it explicitly for scripted use.
+    if not args.yes and sys.stdin.isatty():
+        prompt_preview = " ".join(args.prompt)
+        if len(prompt_preview) > 80:
+            prompt_preview = prompt_preview[:77] + "..."
+        print(f"\n  About to start a REAL run (tokens will be spent):")
+        print(f"    repo:   {repo}")
+        print(f"    agent:  {preset_name}")
+        print(f"    prompt: {prompt_preview}")
+        reply = input("\n  Type 'yes' to proceed, or anything else to cancel: ").strip().lower()
+        if reply != "yes":
+            _release()
+            print("ans-run: cancelled by user", file=sys.stderr)
+            return EX_NOGO
 
     full_argv = agent_argv + args.prompt
 

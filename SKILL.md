@@ -188,10 +188,12 @@ tokens are already spent and a doomed run has already cost money. For headless/c
 start through the launcher instead:
 
 ```
-bin/ans-run [--repo <project>] [--agent <preset>] [--fg] [--check] [--trust] "<prompt>"
+bin/ans-run [--repo <project>] [--agent <preset>] [--fg] [--check] [--yes] [--trust] "<prompt>"
 ```
 
-It is a deterministic GO/NO-GO gate that runs BEFORE the agent CLI boots:
+It is a deterministic GO/NO-GO gate that runs BEFORE the agent CLI boots. After preflight passes, a
+real (non-`--check`) launch asks for a `yes` confirmation before it spends any tokens — skip it with
+`--yes`, or run non-interactively (stdin not a tty, e.g. CI) where it's skipped automatically:
 
 - **config trust (TOFU)** — `.claude/agents-never-sleep.json` travels with the repo and describes
   commands the launcher executes (agent argv, host checks). A new or changed config must be

@@ -87,7 +87,8 @@ def _run(repo: str, *extra: str, env_extra: dict | None = None,
     env.pop("SRC_TOKEN", None)  # tests control this var explicitly
     env.update(env_extra or {})
     return subprocess.run([sys.executable, ANS_RUN, "--repo", repo, *extra],
-                          capture_output=True, text=True, timeout=timeout, env=env)
+                          capture_output=True, text=True, timeout=timeout, env=env,
+                          stdin=subprocess.DEVNULL)
 
 
 # Probe passes ONLY when the resolved value reached the probe's environment — this is the
