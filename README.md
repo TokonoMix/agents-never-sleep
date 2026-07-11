@@ -3,6 +3,21 @@
 **Autonomous Execution Governance** — the governance layer between autonomous coding agents and
 software engineers.
 
+## Quick Start
+
+> **TL;DR:** A coding agent handed a long backlog stops dead the moment it hits one uncertain
+> decision — ANS lets it defer just that ticket and keep working through the rest, reversibly.
+
+```bash
+pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.3.0
+
+python3 -m agents_never_sleep.run next     --repo . --tickets ./backlog
+#   …implement the ticket it hands you…
+python3 -m agents_never_sleep.run complete --repo . --attempted "what you did"
+```
+
+Full walkthrough: [Quick Start](#9-quick-start).
+
 > **Mission:** *Enable autonomous AI agents to complete meaningful work safely, predictably,
 > transparently and without unnecessary human interruption.*
 
