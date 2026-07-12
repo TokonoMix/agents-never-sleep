@@ -9,7 +9,7 @@ software engineers.
 > decision — ANS lets it defer just that ticket and keep working through the rest, reversibly.
 
 ```bash
-pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.3.0
+pip install agents-never-sleep
 
 python3 -m agents_never_sleep.run next     --repo . --tickets ./backlog
 #   …implement the ticket it hands you…
@@ -41,9 +41,8 @@ ANS names and proposes a category — *Autonomous Execution Governance* — the 
 between a model that can act and a developer who isn't watching. The category is one we propose here, not
 an externally settled standard: there is no outside spec and no second implementation yet.
 
-- **Version:** 1.3.0
-- **Install today:** `pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.3.0`
-  (PyPI publish is pending — see [Installation](#8-installation)).
+- **Version:** 1.4.0
+- **Install:** `pip install agents-never-sleep` (see [Installation](#8-installation)).
 - **Source:** [TokonoMix/agents-never-sleep](https://github.com/TokonoMix/agents-never-sleep) · MIT
 
 ### ANS is NOT / ANS IS
@@ -508,22 +507,23 @@ run is flagged loudly so "the run finished" is never mistaken for "the work got 
 
 The harness is pure Python standard library — **zero runtime dependencies**.
 
-**Today (PyPI not yet live):**
+**From PyPI (recommended):**
 
 ```bash
-# From the tagged GitHub release:
-pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.3.0
+pip install agents-never-sleep
+# For a CLI-isolated install: pipx install agents-never-sleep  (or: uv tool install agents-never-sleep)
+```
+
+**Alternatives** — pin an exact tag, or hack on a checkout:
+
+```bash
+# Pin a specific tagged release straight from GitHub:
+pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.4.0
 
 # Or from a checkout (editable, to hack on it):
 git clone https://github.com/TokonoMix/agents-never-sleep
 cd agents-never-sleep
 pip install .          # or: pip install -e .
-```
-
-**Once published to PyPI** (publish is a pending, deliberate release step — not yet available):
-
-```bash
-pip install agents-never-sleep      # ← will work after the PyPI publish; not yet
 ```
 
 Either install puts two console scripts on PATH: `ans` (= `python3 -m agents_never_sleep.run`, the
@@ -540,7 +540,7 @@ the latter).
 
 Five minutes from zero to a first unattended run.
 
-1. **Install** (above) — `pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.3.0`.
+1. **Install** (above) — `pip install agents-never-sleep`.
 2. **Understand the contract:** unattended, the agent only ever **PROCEEDs** (assume + log + continue,
    reversibly), **PARKs** (defer this one ticket, keep going), or **HALTs** (only on irreversible
    danger). It never **ASKs** — there's nobody to answer. PARK keeps the run moving; that's the whole
@@ -839,9 +839,6 @@ its setup, not before.
 
 Direction, not promises. The current published state is the baseline.
 
-- **PyPI publish.** 1.3.0 is distributed via the GitHub release today; a bare
-  `pip install agents-never-sleep` becomes available once the package is published to PyPI (a
-  deliberate, separate release step).
 - **More live-verified platforms.** Today only Claude Code is live-verified. Gemini / Codex / Copilot /
   Cursor / Windsurf are built-to-contract; promoting each to live-verified is a ~5-minute smoke-test on
   the real tool (`hooks/platforms/README.md`). Aider (wrapper preset) hardening — particularly the
@@ -885,7 +882,7 @@ The full, term-by-term reference (with the module each term lives in) is in the
 ## Documentation
 
 The deep-dive docs live in [`docs/`](docs/). Each is dual-audience (a senior engineer *and* an AI system
-parsing it) and verified against the `agents_never_sleep/` source for v1.3.0 (additive releases only; see `CHANGELOG.md`).
+parsing it) and verified against the `agents_never_sleep/` source for v1.4.0 (additive releases only; see `CHANGELOG.md`).
 
 **Foundations**
 - [Manifesto](docs/manifesto.md) — the *Autonomous Execution Governance* discipline: emergence, the ten principles, design principles, the Git-analogy thesis.

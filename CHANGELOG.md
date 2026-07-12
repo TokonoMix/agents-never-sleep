@@ -10,6 +10,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-12
+
+First release published to PyPI: `pip install agents-never-sleep` now resolves the package
+directly, so users no longer need the `git+https://…@tag` form (that form keeps working). No
+runtime dependencies; the wheel is pure standard library.
+
+### Added — consensus-grounding routing knobs
+- **Additive council config keys** in `default_config()`: `consensus_context_cap_tokens`,
+  `consensus_context_route_margin`, and `consensus_context_upload` — routing knobs for the
+  consensus-grounding gate. Additive only: no existing key, value, or signature changed.
+
+### Changed — onboarding
+- **First-run onboarding gains an explicit confirmation prompt** before it acts, and the
+  `report` command is now side-effect-free (it only reads and prints run state).
+
+### Security — public-surface hardening
+- **Self-contained redaction gate in CI** (`scripts/redact_lint.sh` + the `surface-parity`
+  workflow) fails the build if an unambiguously-internal token reaches a tracked file.
+- **Deny-hook enforcement bypasses closed.** The irreversible-command deny matcher missed
+  several quoted / brace-expanded / equivalent-spelling forms of already-blocked operations
+  (force-push refspecs, `${HOME}`-style brace variables, `vault kv metadata delete`, quoted
+  `dd of=`); each is now matched. The deny hook also no longer fails open, and the state
+  directory is created with owner-only permissions. Regression tests in
+  `acceptance/test_enforcement.py`.
+
 ### Added — run-branch/worktree isolation safety
 
 - **Auto-worktree isolation.** An unattended run now isolates itself in a dedicated external git
