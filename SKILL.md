@@ -556,12 +556,20 @@ Before running an F5/consensus grounding, ground it instead of inlining raw cont
    - `mode: "inline"` → send the context as today, no upload step.
    - `mode: "upload"` → call `tokonomix_upload(plan_to_upload_args(plan))`, then pass the returned
      `context: {session, handles}` to `tokonomix_consensus_ask` alongside a lean prompt (the bulk of
-     the evidence now lives in the uploaded session, not the prompt body). Two gateway requirements
-     for the grounded call: (a) use the multi-model consensus model — a bare single-model slug plus
-     `x_council` context is rejected; (b) if an inline context ever comes back over the server cap
-     (a `needs_upload` rejection), that is the same signal as a `mode: "upload"` plan — upload, then
-     re-ask with `context.session`. Confirm grounding actually landed: the response must NOT carry a
-     `grounding_not_applied` warning (an unapplied context mode returns `grounding.applied: false`).
+     the evidence now lives in the uploaded session, not the prompt body). Three gateway requirements
+     for the grounded call: **(a)** target the multi-model consensus model — the literal
+     `tokonomix-consensus`, NOT the per-proposer `models=[…]` / `judge_models=[…]` form used for the
+     ungrounded review gate; a bare single-model slug plus `x_council` context is rejected (HTTP 400).
+     **(b)** if a context you sent inline comes back rejected as over the server cap (a `needs_upload`
+     / HTTP 413 response), that is the ONE sanctioned exception to "execute the plan verbatim":
+     re-invoke `plan_grounding(repo_context, route_margin=0, upload_available=True)` to force the
+     upload branch — it rebuilds a non-empty `files` payload from the same `repo_context` (calling
+     `plan_to_upload_args` on the original *inline* plan would upload nothing, since an inline plan
+     carries no files), then upload and re-ask with `context.session`. **(c)** confirm grounding
+     actually landed: the response must NOT carry a `grounding_not_applied` warning (an unapplied
+     context mode returns `x_council.grounding.applied: false`); if it does, treat the result as
+     `degraded` / `ungrounded-consensus-unavailable` (`resolved=False` → `KEEP_PARKED`), never as a
+     valid grounded review.
    - `mode: "degraded"` → do not call the council at all. Report an
      `ungrounded-consensus-unavailable` verdict (`resolved=False` → `KEEP_PARKED`) rather than sending
      an ungrounded or truncated context.
