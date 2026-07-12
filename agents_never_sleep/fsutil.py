@@ -20,8 +20,24 @@ def ensure_private_dir(path: str) -> None:
     CWD)."""
     if not path:
         return
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
+    abspath = os.path.abspath(path)
+    # os.makedirs applies `mode` only to the LEAF; intermediate dirs it creates get the umask
+    # default (0755 under umask 022), so a fresh `.unattended` parent would be left world-listable
+    # while its secret-bearing children are 0700. Record which ancestors don't exist yet (makedirs
+    # will create them) and tighten each, stopping at the first EXISTING ancestor so we never chmod
+    # a pre-existing dir like the repo root.
+    created = []
+    p = abspath
+    while p and not os.path.exists(p):
+        created.append(p)
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    os.makedirs(abspath, mode=0o700, exist_ok=True)
+    # chmod the leaf (retroactive tighten even when it already existed) + every ancestor just created.
+    for d in {abspath, *created}:
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass

@@ -55,6 +55,13 @@ def test_irreversible(failures):
         ("rm -r -f /", "recursive delete of a root/home path"),
         ("rm --recursive --force /", "recursive delete of a root/home path"),
         ("rm -r /important", "recursive delete of a root/home path"),
+        # second security-review pass (2026-07-12): quoted/braced forms that beat the H1 patterns.
+        ("git push origin '+master'", "force-push"),          # quoted +refspec force
+        ('git push origin "+topic"', "force-push"),
+        ("rm -rf ${HOME}", "recursive delete of a root/home path"),   # brace form of the covered $HOME
+        ('rm -rf "${HOME}"', "recursive delete of a root/home path"),
+        ("vault kv metadata delete secret/x", "Vault secret deletion"),  # permanent (vs recoverable kv delete)
+        ('dd if=/dev/zero of="/dev/sda"', "disk-destructive command"),   # quoted device path
     ]
     for cmd, kind in deny:
         bad, k = E.is_irreversible(cmd)
@@ -74,6 +81,9 @@ def test_irreversible(failures):
         "rm -rf node_modules",             # local
         "pytest -q",
         "echo dropping the table is fine in prose",  # not an actual SQL drop command... see note
+        "git push origin 'main'",          # quoted NORMAL branch (no +) — must ALLOW (no over-block)
+        "echo ${HOME}/logs",               # a braced-var mention without rm — must ALLOW
+        "vault kv get secret/x",           # a read, not a delete — must ALLOW
     ]
     for cmd in allow:
         bad, _ = E.is_irreversible(cmd)

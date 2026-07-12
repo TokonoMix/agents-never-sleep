@@ -18,8 +18,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.." 2>/dev/null || exit 0   # skill root = parent of hooks/, for `python3 -m`
-# NOT `set -e`/`exec`-guarded: a broken install (python missing, import error) must FAIL OPEN, never
-# wedge a tool call. `enforce.py claude pre_tool` only ever intentionally exits 0 either way (the
-# decision is carried in stdout JSON, not the exit code) — force 0 regardless so a crash can't wedge.
-python3 -m agents_never_sleep.enforce claude pre_tool
+# A broken install (python missing, import error) must FAIL OPEN, never wedge a tool call.
+# `enforce.py claude pre_tool` carries its DENY in stdout JSON and only ever exits 0 by intent, so the
+# `|| true` swallows a CRASH's non-zero — which `set -e` would otherwise propagate, making the `exit 0`
+# below dead code. Fail-open then holds regardless of the harness's own exit-code handling.
+python3 -m agents_never_sleep.enforce claude pre_tool || true
 exit 0

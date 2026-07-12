@@ -40,7 +40,7 @@ _ASK_TOOLS = {"askuserquestion", "ask_user", "clarify"}
 # never produces these literal substrings and cannot be caught by any string/regex matcher. See
 # SECURITY.md.
 _IRREVERSIBLE = [
-    (re.compile(r"git\s+push\b.*(--force\b|--force-with-lease\b|\s-[a-z]*f[a-z]*\b|\s\+[\w][\w./-]*)",
+    (re.compile(r"git\s+push\b.*(--force\b|--force-with-lease\b|\s-[a-z]*f[a-z]*\b|[\s'\"]\+[\w][\w./-]*)",
                 re.I), "force-push"),
     (re.compile(r"git\s+push\b.*(:\S|\s--delete\b)", re.I), "remote branch/tag delete"),
     (re.compile(r"git\s+push\b.*--mirror\b", re.I), "mirror push"),
@@ -48,11 +48,11 @@ _IRREVERSIBLE = [
     # anywhere on the line, combined with a dangerous root/home path anywhere on the line — so
     # `rm -r -f /`, `rm --recursive --force /`, and `rm -fr /` all deny alike.
     (re.compile(r"\brm\b(?=[^\n]*(?:-[a-z]*[rf][a-z]*\b|--recursive\b|--force\b|--no-preserve-root\b))"
-                r"[^\n]*[\s'\"](/|~|\$HOME)", re.I),
+                r"[^\n]*[\s'\"](/|~|\$\{?HOME\b)", re.I),
      "recursive delete of a root/home path"),
     (re.compile(r"\b(drop\s+database|drop\s+table|truncate\s+table)\b", re.I), "destructive SQL"),
-    (re.compile(r"\bmkfs\b|\bdd\b[^\n]*\bof=/dev/|\bshred\b", re.I), "disk-destructive command"),
-    (re.compile(r"\bvault\s+(kv\s+)?(delete|destroy)\b", re.I), "Vault secret deletion"),
+    (re.compile(r"\bmkfs\b|\bdd\b[^\n]*\bof=['\"]?/dev/|\bshred\b", re.I), "disk-destructive command"),
+    (re.compile(r"\bvault\s+(kv\s+)?(delete|destroy|metadata\s+delete)\b", re.I), "Vault secret deletion"),
     (re.compile(r"\bvault\s+kv\s+put\b|\bvault\s+write\b[^\n]*rotate", re.I), "Vault secret write/rotate"),
     (re.compile(r"\bsendmail\b|\bmailx\b|\bmail\s+-s\b", re.I), "sending real email"),
     (re.compile(r"\bsystemctl\s+(stop|disable)\b|\bdocker\s+(rm|volume\s+rm)\b", re.I),
