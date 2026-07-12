@@ -55,6 +55,25 @@ def test_config_has_consensus_context_defaults():
     assert "consensus_context_route_margin" in blob
     assert "consensus_context_upload" in blob
 
+def test_inline_plan_yields_empty_upload_args():
+    # The 413-recovery pitfall the SKILL.md guidance warns about: an inline plan carries no files,
+    # so plan_to_upload_args(inline_plan) would upload NOTHING. This locks that behavior so the
+    # route_margin=0 recovery below stays the documented answer.
+    inline = plan_grounding("x" * 400, upload_available=True)   # ~100 tok -> inline
+    assert inline.mode == "inline"
+    assert plan_to_upload_args(inline)["files"] == []
+
+def test_route_margin_zero_forces_nonempty_upload():
+    # T1 / needs_upload(413) recovery: re-invoking with route_margin=0 forces the upload branch and
+    # rebuilds a NON-EMPTY payload from the same in-hand repo_context (no new API needed).
+    ctx = "critical-evidence-first" * 20      # small enough that the default margin inlines it
+    assert plan_grounding(ctx, upload_available=True).mode == "inline"
+    forced = plan_grounding(ctx, route_margin=0, upload_available=True)
+    assert forced.mode == "upload"
+    args = plan_to_upload_args(forced)
+    assert args["files"] and args["files"][0]["content"], "forced upload must carry the context"
+    assert "".join(f["content"] for f in forced.files) == ctx   # content preserved verbatim
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
