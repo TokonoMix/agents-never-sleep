@@ -2,6 +2,9 @@
 """Plan 2 wiring: the hard-category widening end-to-end — offer record snapshots the effective set,
 resolve re-checks against THAT set (not fresh config), and a hard-category resolution is forced to
 DONE_LOW_CONFIDENCE + daylight review even with a green gate."""
+# py3.9 compat (requires-python >= 3.9): PEP 604 annotations must not evaluate at def time.
+from __future__ import annotations
+
 import json
 import os
 import shutil

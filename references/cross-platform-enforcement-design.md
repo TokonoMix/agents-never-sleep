@@ -61,10 +61,11 @@ Three units, each one purpose, testable in isolation:
    <platform> <event>` reads the platform's stdin JSON, NORMALISES it to (tool_name, command),
    calls the core `decide()`, and emits THAT platform's deny/block shape (or exit code). Env-gated to
    `CLAUDE_UNATTENDED=1` (rename-agnostic: also honours `UE_UNATTENDED=1`). One dispatcher, one place
-   to test each platform's I/O translation. The proven Claude bash hooks stay as-is (no risky refactor
-   of working security code); enforce.py serves the NEW platforms. The irreversible patterns live in
-   enforcement.py as canonical; deny_irreversible.sh's copy is documented as a known duplicate to
-   converge later.
+   to test each platform's I/O translation. `deny_ask.sh`/`stop_guard.sh` stay as proven standalone
+   bash (simple enough — single tool-name / sentinel-file check — that a shared core buys nothing);
+   `deny_irreversible.sh` converged onto this dispatcher (`python3 -m agents_never_sleep.enforce
+   claude pre_tool`) post-audit, so the irreversible pattern list now lives ONLY in enforcement.py —
+   no duplicate copy left to drift.
 
 3. **`agents_never_sleep/capabilities.py` — capability detection + degradation reporting.** The matrix above as
    data: `guarantees(platform) -> {deny_irreversible, never_stop, never_ask: native|degraded}`, plus

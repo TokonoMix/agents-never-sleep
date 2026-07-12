@@ -178,6 +178,236 @@ def test_bug4_hard_fail_on_path_mismatch(failures):
     if proc_ok.returncode != 0:
         failures.append(f"[BUG4] run from repo root should pass, got {proc_ok.returncode} "
                         f"({proc_ok.stdout!r} {proc_ok.stderr!r})")
+    # A SYMLINKED spelling of the same repo must ALSO pass: the guard compares directory
+    # IDENTITY, not spelling. This is the macOS default — TMPDIR lives under /var/folders,
+    # a symlink to /private/var/folders, so getcwd() (always physical) never string-equals
+    # a --repo passed through the symlink even though CWD *is* the repo (2026-07-08 E2E).
+    link_parent = tempfile.mkdtemp(prefix="ue-h-cwd-link-")
+    link = os.path.join(link_parent, "repo-link")
+    os.symlink(repo, link)
+    proc_link = subprocess.run([sys.executable, "-m", "harness.run", "next", "--repo", link,
+                                "--tickets", "tickets", "--state-dir", "state",
+                                "--artifacts-dir", "artifacts"], cwd=repo, env=env,
+                               capture_output=True, text=True)
+    if proc_link.returncode != 0:
+        failures.append(f"[BUG4-symlink] symlinked --repo spelling of CWD should pass, got "
+                        f"{proc_link.returncode} ({proc_link.stdout!r} {proc_link.stderr!r})")
+
+
+def test_halt_readonly_repo_report_degrades(failures):
+    """HALT in a read-only repo root (the flagship no-safety-net case: no VCS, git init
+    impossible) must still emit the terminal HALTED JSON on exit 0 — the report write DEGRADES
+    (fallback under .unattended/, or a report_error note), it never becomes an unhandled
+    PermissionError traceback that breaks the agent-facing JSON contract (2026-07-08 E2E)."""
+    work = tempfile.mkdtemp(prefix="ue-h-ro-halt-")
+    repo = os.path.join(work, "repo")
+    os.makedirs(os.path.join(repo, "tickets"))
+    with open(os.path.join(repo, "tickets", "h1.md"), "w", encoding="utf-8") as fh:
+        fh.write("---\nid: h1\ntitle: Tidy a comment\n---\n\nFix the typo in notes.txt.\n")
+    with open(os.path.join(repo, "notes.txt"), "w", encoding="utf-8") as fh:
+        fh.write("# nots\n")
+    os.makedirs(os.path.join(repo, ".claude"))
+    with open(os.path.join(repo, ".claude", "agents-never-sleep.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema_version": 1,
+                   "gates": [{"name": "noop", "command": ["true"], "blocking": True}],
+                   "autonomy": {"non_destructive_only": False},
+                   "report": {"local_path": "night-report.md"}}, fh)
+    # .unattended stays writable (state/heartbeat live there); only the repo ROOT is read-only,
+    # so git init AND the night-report write both fail — exactly the reproduced scenario.
+    os.makedirs(os.path.join(repo, ".unattended"))
+    env = dict(os.environ)
+    env["CLAUDE_UNATTENDED"] = "1"
+    env.pop("UE_RUN_INCOMPLETE", None)
+    env["PYTHONPATH"] = SKILL_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    os.chmod(repo, 0o555)
+    try:
+        proc = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                               "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                              capture_output=True, text=True)
+    finally:
+        os.chmod(repo, 0o755)
+    if proc.returncode != 0:
+        failures.append(f"[ro-halt] expected exit 0 with HALTED JSON, got {proc.returncode} "
+                        f"(stderr: {proc.stderr[-300:]!r})")
+        return
+    try:
+        out = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        failures.append(f"[ro-halt] non-JSON output: {proc.stdout!r}")
+        return
+    if out.get("status") != "HALTED":
+        failures.append(f"[ro-halt] expected status HALTED, got {out!r}")
+    # The degraded report must be honest: either a fallback path that really exists,
+    # or report_path null + an explanatory report_error.
+    rp = out.get("report_path")
+    if rp:
+        if not os.path.exists(rp):
+            failures.append(f"[ro-halt] report_path {rp!r} does not exist")
+    elif not out.get("report_error"):
+        failures.append(f"[ro-halt] no report_path and no report_error note: {out!r}")
+
+
+def _chmod_recursive(root: str, mode: int) -> None:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            os.chmod(os.path.join(dirpath, name), mode)
+    os.chmod(root, mode)
+
+
+def _new_repo_env(repo: str) -> dict:
+    env = dict(os.environ)
+    env["CLAUDE_UNATTENDED"] = "1"
+    env.pop("UE_RUN_INCOMPLETE", None)
+    env["PYTHONPATH"] = SKILL_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
+def test_gate_command_as_string_does_not_crash(failures):
+    """`gates[].command` as a natural JSON string (e.g. "bash gate.sh"), not a list, must be
+    split like a shell command line — handing the whole string to subprocess.run() verbatim
+    makes it treat the string as ONE argv[0] and raise FileNotFoundError, crashing `next` with a
+    raw traceback instead of running the gate (2026-07-08 E2E, second session)."""
+    work = tempfile.mkdtemp(prefix="ue-h-strcmd-")
+    repo = os.path.join(work, "repo")
+    os.makedirs(os.path.join(repo, "tickets"))
+    with open(os.path.join(repo, "tickets", "s1.md"), "w", encoding="utf-8") as fh:
+        fh.write("---\nid: s1\ntitle: Trivial\n---\n\nAdd a comment to notes.txt.\n")
+    with open(os.path.join(repo, "notes.txt"), "w", encoding="utf-8") as fh:
+        fh.write("# notes\n")
+    with open(os.path.join(repo, "gate.sh"), "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/bash\nexit 0\n")
+    os.chmod(os.path.join(repo, "gate.sh"), 0o755)
+    os.makedirs(os.path.join(repo, ".claude"))
+    with open(os.path.join(repo, ".claude", "agents-never-sleep.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema_version": 1,
+                   "gates": [{"name": "t", "command": "bash gate.sh", "blocking": True}],
+                   "autonomy": {"non_destructive_only": False}}, fh)
+    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t.local"],
+                ["git", "config", "user.name", "tester"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "init"]):
+        subprocess.run(cmd, cwd=repo, check=True)
+    env = _new_repo_env(repo)
+    proc = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                           "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        failures.append(f"[gate-str] expected exit 0, got {proc.returncode} "
+                        f"(stdout={proc.stdout!r} stderr={proc.stderr[-300:]!r})")
+        return
+    try:
+        out = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        failures.append(f"[gate-str] non-JSON output (traceback?): {proc.stdout!r}")
+        return
+    if out.get("status") != "PROCEED":
+        failures.append(f"[gate-str] expected PROCEED, got {out!r}")
+
+
+def test_halt_readonly_repo_fully_locked(failures):
+    """Read-only repo, UNCONFIGURED bootstrap path only: no saved config, so `next` exits early at
+    the NON_DESTRUCTIVE branch — this covers the _Context.__init__ crash (preflight.write_profile /
+    the state-dir bootstrap died with an unhandled PermissionError before the driver ran, 2026-07-08
+    E2E, second session) and nothing past it. The realistic configured-project paths (gitignore
+    append, run-incomplete sentinel, state writes with the dir already existing) are covered by
+    test_halt_readonly_repo_realistic_project below (2026-07-08 E2E, third session, finding 2.1)."""
+    for warm in (False, True):
+        work = tempfile.mkdtemp(prefix="ue-h-ro-full-")
+        repo = os.path.join(work, "repo")
+        os.makedirs(os.path.join(repo, "tickets"))
+        with open(os.path.join(repo, "tickets", "r1.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nid: r1\ntitle: Tidy\n---\n\nFix the typo in notes.txt.\n")
+        with open(os.path.join(repo, "notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("# nots\n")
+        env = _new_repo_env(repo)
+        if warm:
+            subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                            "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                           capture_output=True, text=True)
+        _chmod_recursive(repo, 0o555)
+        try:
+            proc = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                                   "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                                  capture_output=True, text=True)
+        finally:
+            _chmod_recursive(repo, 0o755)
+        label = "warm" if warm else "fresh"
+        if proc.returncode != 0:
+            failures.append(f"[ro-full-{label}] expected exit 0, got {proc.returncode} "
+                            f"(stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r})")
+            continue
+        try:
+            out = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            failures.append(f"[ro-full-{label}] non-JSON output (traceback?): {proc.stdout!r}")
+
+
+def test_halt_readonly_repo_realistic_project(failures):
+    """Read-only repo, REALISTIC project: config already committed (autonomy enabled), git history
+    present, at least one ticket — so `next` gets past the early NON_DESTRUCTIVE branch and into
+    the driver. Before the fix it crashed with a raw PermissionError traceback (exit 1) at TWO
+    sites the state-dir redirect does not cover: Git._ensure_gitignore's bare `open(gi, "a")`
+    (vcs.py) and _set_sentinel's bare os.makedirs of the repo-pinned sentinel dir (driver.py)
+    (2026-07-08 E2E, third session, finding 2.1).
+
+    fresh (tree locked before any run): the gitignore append fails -> no establishable safety net
+    -> classify HALTs -> clean HALTED JSON, exit 0.
+    warm (one healthy run, THEN locked): .gitignore already carries the protect entry and the
+    in-repo state dir EXISTS (so makedirs(exist_ok=True) alone would not trigger the redirect —
+    the writability probe must) -> clean JSON, exit 0, no traceback."""
+    for warm in (False, True):
+        work = tempfile.mkdtemp(prefix="ue-h-ro-real-")
+        repo = os.path.join(work, "repo")
+        os.makedirs(os.path.join(repo, "tickets"))
+        with open(os.path.join(repo, "tickets", "r1.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nid: r1\ntitle: Tidy\n---\n\nFix the typo in notes.txt.\n")
+        with open(os.path.join(repo, "notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("# nots\n")
+        os.makedirs(os.path.join(repo, ".claude"))
+        with open(os.path.join(repo, ".claude", "agents-never-sleep.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"schema_version": 1,
+                       "gates": [{"name": "t", "command": "true", "blocking": True}],
+                       "autonomy": {"non_destructive_only": False}}, fh)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t.local"],
+                    ["git", "config", "user.name", "tester"], ["git", "add", "-A"],
+                    ["git", "commit", "-q", "-m", "init"]):
+            subprocess.run(cmd, cwd=repo, check=True)
+        env = _new_repo_env(repo)
+        if warm:
+            warmup = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                                     "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                                    capture_output=True, text=True)
+            if warmup.returncode != 0:
+                failures.append(f"[ro-real-warm] setup run failed: {warmup.stderr[-300:]!r}")
+                continue
+        _chmod_recursive(repo, 0o555)
+        try:
+            proc = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "next",
+                                   "--repo", ".", "--tickets", "tickets"], cwd=repo, env=env,
+                                  capture_output=True, text=True)
+        finally:
+            _chmod_recursive(repo, 0o755)
+        label = "warm" if warm else "fresh"
+        if "PermissionError" in proc.stderr or "Traceback" in proc.stderr:
+            failures.append(f"[ro-real-{label}] raw traceback leaked: {proc.stderr[-400:]!r}")
+            continue
+        if proc.returncode != 0:
+            failures.append(f"[ro-real-{label}] expected exit 0, got {proc.returncode} "
+                            f"(stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r})")
+            continue
+        try:
+            out = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            failures.append(f"[ro-real-{label}] non-JSON output (traceback?): {proc.stdout!r}")
+            continue
+        if not warm and out.get("status") != "HALTED":
+            failures.append(f"[ro-real-fresh] expected clean HALTED (no establishable safety "
+                            f"net), got {out!r}")
+        if not warm and "safety net" not in (out.get("reason") or ""):
+            failures.append(f"[ro-real-fresh] HALT reason should name the missing safety net, "
+                            f"got {out.get('reason')!r}")
 
 
 def test_frontmatter_horizontal_rule(failures):
@@ -239,6 +469,10 @@ def main() -> int:
     test_pending_recovery_preserves_committed_done(failures)
     test_driver_beats_heartbeat(failures)
     test_bug4_hard_fail_on_path_mismatch(failures)
+    test_halt_readonly_repo_report_degrades(failures)
+    test_gate_command_as_string_does_not_crash(failures)
+    test_halt_readonly_repo_fully_locked(failures)
+    test_halt_readonly_repo_realistic_project(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — hardening regressions")

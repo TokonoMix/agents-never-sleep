@@ -26,6 +26,8 @@ import os
 import subprocess
 import time
 
+from .fsutil import ensure_private_dir
+
 CACHE_FILENAME = "gate-baseline-cache.json"
 
 # Same rationale as gates.py's _NONINTERACTIVE_ENV: these are read-only git probes, but a hung
@@ -89,7 +91,7 @@ def write(path: str, *, tree_id: str, command: list[str]) -> None:
         "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, sort_keys=True)

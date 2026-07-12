@@ -213,6 +213,69 @@ def test_unborn_repo_defers_isolation_no_bogus_base(failures):
     os.environ.pop("UE_RUN_INCOMPLETE", None)
 
 
+def test_recovery_after_stale_halt_does_not_graft_old_lineage(failures):
+    """2026-07-08 E2E finding 2.2: following the stale-resume HALT's OWN recovery instruction
+    (inspect, then remove run-branch.json) must yield a working fresh run. Before the fix the
+    crash-recovery block reset the freshly forked run branch `--hard` to the OLD run's
+    pending.snapshot with no ancestry check — silently grafting it onto the disconnected old
+    lineage (exit 0, PROCEED); the corruption only surfaced on the NEXT call as a second
+    HALT_RESUME_UNSAFE that looked unrelated to the instruction the operator had just followed."""
+    import time
+    repo = _new_repo()
+    work = tempfile.mkdtemp(prefix="ue-freshness-wk-")
+    os.environ["UE_RUN_INCOMPLETE"] = os.path.join(work, "state", "run-incomplete")
+    runbranch_path = os.path.join(work, "state", "run-branch.json")
+    pending_path = os.path.join(work, "state", "pending.json")
+
+    # Process 1: a run forks its branch and hands out t1 (pending.json checkpoint), then dies.
+    r1 = _driver(repo, work).next_ticket()
+    if r1.get("status") != "PROCEED":
+        failures.append(f"[graft] setup: expected PROCEED, got {r1.get('status')!r}")
+        return
+    if not os.path.exists(pending_path):
+        failures.append("[graft] setup: PROCEED must leave a pending.json checkpoint")
+        return
+
+    _rewrite_main_unrelated(repo)  # the operator's branch moved to an unrelated history
+
+    # First HALT: documented and expected (the stale-resume guard).
+    try:
+        _driver(repo, work).next_ticket()
+        failures.append("[graft] stale resume must HALT before any recovery")
+        return
+    except RunResumeUnsafe:
+        pass
+
+    # The operator follows the HALT's instruction: remove run-branch.json, call `next` again.
+    # (The sleep keeps the new ans/run-<ts>-<pid> name from colliding with process 1's branch —
+    # same pid in-process, and possibly the same strftime second.)
+    os.unlink(runbranch_path)
+    time.sleep(1.1)
+    new_main = _git(repo, "rev-parse", "main").stdout.strip()
+    try:
+        r3 = _driver(repo, work).next_ticket()
+    except RunResumeUnsafe:
+        failures.append("[graft] recovery per the HALT's own instruction HALTed again immediately")
+        return
+    if r3.get("status") != "PROCEED":
+        failures.append(f"[graft] recovery `next` should PROCEED, got {r3.get('status')!r}")
+    # The freshly forked run branch must still descend from the operator's NEW tip. A reset
+    # --hard to the old pending.snapshot moves HEAD onto the old, disconnected lineage instead.
+    if _git(repo, "merge-base", "--is-ancestor", new_main, "HEAD").returncode != 0:
+        failures.append("[graft] run branch was grafted onto the OLD run's lineage "
+                        "(pending.snapshot reset without an ancestry check)")
+
+    # And the call AFTER recovery must not HALT either — this is where the graft used to surface.
+    try:
+        r4 = _driver(repo, work).next_ticket()
+        if str(r4.get("status", "")).startswith("HALT"):
+            failures.append(f"[graft] second call after recovery HALTed: {r4.get('status')!r}")
+    except RunResumeUnsafe:
+        failures.append("[graft] second call after recovery hit HALT_RESUME_UNSAFE — the exact "
+                        "delayed corruption the recovery instruction was supposed to avoid")
+    os.environ.pop("UE_RUN_INCOMPLETE", None)
+
+
 def main() -> int:
     failures = []
     test_stale_resume_halts_and_preserves_untracked(failures)
@@ -220,6 +283,7 @@ def main() -> int:
     test_healthy_resume_still_proceeds(failures)
     test_git_error_in_safety_check_halts_not_degrades(failures)
     test_unborn_repo_defers_isolation_no_bogus_base(failures)
+    test_recovery_after_stale_halt_does_not_graft_old_lineage(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — stale run-branch resume is not guarded")

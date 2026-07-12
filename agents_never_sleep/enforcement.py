@@ -9,11 +9,13 @@ The three guarantees:
   * deny-irreversible — deny a genuinely irreversible / outward command.
   * never-stop       — block an end-of-turn while the run-incomplete sentinel exists.
 
-NB: the Claude adapter predates this module as three proven bash hooks (hooks/*.sh) and keeps its own
-copy of the irreversible patterns. The canonical copy now lives HERE (INT-1935 single-source audit);
-converging deny_irreversible.sh onto this module is a documented follow-up (avoid refactoring proven
-security code without need). ALL new "never do" patterns go into _IRREVERSIBLE below — not in SKILL.md
-or any hook file.
+NB: the Claude adapter predates this module as three proven bash hooks (hooks/*.sh). Two of them
+(deny_ask.sh, stop_guard.sh) are simple enough (single tool-name / sentinel-file check) that they stay
+standalone. deny_irreversible.sh used to keep its own copy of the irreversible patterns in bash
+case/glob form; it now delegates to `python3 -m agents_never_sleep.enforce claude pre_tool` (the same
+dispatcher every non-Claude platform hook already calls), so this module is the ONLY place the
+irreversible pattern list lives — there is nothing left to drift out of sync. ALL new "never do"
+patterns go into _IRREVERSIBLE below — not in SKILL.md or any hook file.
 """
 from __future__ import annotations
 
@@ -28,13 +30,25 @@ import re
 # exposes a tool named `clarify` (v1.1).
 _ASK_TOOLS = {"askuserquestion", "ask_user", "clarify"}
 
-# Irreversible / outward command patterns (case-insensitive), mirroring hooks/deny_irreversible.sh.
+# Irreversible / outward command patterns (case-insensitive) — the sole copy (see module docstring).
 # Deliberately NOT matching local `git reset --hard` / `git clean` — that's the harness's own revert.
+#
+# These are shape-anchored, same philosophy as redact.py's patterns: a backstop against STANDARD-FORM
+# shell invocations (whitespace variance, short-flag bundling/reordering like `-qf`/`-fr`, long- vs
+# short-flag spelling, force-via-`+`refspec), not a boundary against every conceivable obfuscation — a
+# command routed through a non-shell wrapper (python subprocess, a git alias, a base64-decoded script)
+# never produces these literal substrings and cannot be caught by any string/regex matcher. See
+# SECURITY.md.
 _IRREVERSIBLE = [
-    (re.compile(r"git\s+push\b.*(--force\b|\s-f\b|--force-with-lease\b)", re.I), "force-push"),
+    (re.compile(r"git\s+push\b.*(--force\b|--force-with-lease\b|\s-[a-z]*f[a-z]*\b|\s\+[\w][\w./-]*)",
+                re.I), "force-push"),
     (re.compile(r"git\s+push\b.*(:\S|\s--delete\b)", re.I), "remote branch/tag delete"),
     (re.compile(r"git\s+push\b.*--mirror\b", re.I), "mirror push"),
-    (re.compile(r"\brm\s+-[a-z]*[rf][a-z]*\s+(/|~|\$HOME)", re.I),
+    # A lookahead for ANY recursive/force-ish flag (bundled, reordered, or separate/long-form tokens)
+    # anywhere on the line, combined with a dangerous root/home path anywhere on the line — so
+    # `rm -r -f /`, `rm --recursive --force /`, and `rm -fr /` all deny alike.
+    (re.compile(r"\brm\b(?=[^\n]*(?:-[a-z]*[rf][a-z]*\b|--recursive\b|--force\b|--no-preserve-root\b))"
+                r"[^\n]*[\s'\"](/|~|\$HOME)", re.I),
      "recursive delete of a root/home path"),
     (re.compile(r"\b(drop\s+database|drop\s+table|truncate\s+table)\b", re.I), "destructive SQL"),
     (re.compile(r"\bmkfs\b|\bdd\b[^\n]*\bof=/dev/|\bshred\b", re.I), "disk-destructive command"),

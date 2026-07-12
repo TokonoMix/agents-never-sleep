@@ -10,6 +10,10 @@ cd "$(dirname "$0")/.."
 unset CLAUDE_UNATTENDED UE_RUN_INCOMPLETE UE_HEARTBEAT UE_SESSION_TICKET_BUDGET UE_SESSION_BUDGET_MARKER
 fail=0
 for t in acceptance/test_*.py acceptance/run_acceptance.py; do
+  # test_real_claude.py is a pytest-marked INTEGRATION test (spawns a real `claude -p`,
+  # needs pytest + the CLI + credentials) — by its own header it is NOT in the standard
+  # hermetic suite. Run it explicitly: pytest -m integration acceptance/test_real_claude.py
+  [ "$t" = "acceptance/test_real_claude.py" ] && continue
   if ! python3 "$t" >/dev/null 2>&1; then
     echo "RED: $t"
     fail=1

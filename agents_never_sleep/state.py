@@ -24,6 +24,8 @@ import tempfile
 import time
 from typing import Optional
 
+from .fsutil import ensure_private_dir
+
 
 class OutcomeState(str, enum.Enum):
     DONE = "DONE"
@@ -96,7 +98,7 @@ class OutcomeStore:
     def __init__(self, state_dir: str, clock=time.time):
         self.state_dir = state_dir
         self._clock = clock
-        os.makedirs(state_dir, exist_ok=True)
+        ensure_private_dir(state_dir)
 
     def _path(self, ticket_id: str) -> str:
         safe = ticket_id.replace("/", "_")

@@ -20,22 +20,37 @@ own children. A same-named process outside this tree is untouched.
 Coverage honesty: an in-process reaper covers the RESTART path (watchdog _terminate) and a GRACEFUL
 watchdog SIGTERM (signal handler). A SIGKILL'd watchdog cannot self-reap, so the kill-9+resume leak
 is reduced, not eliminated.
+
+Process-table source: /proc on Linux; where /proc does not exist (macOS/BSD) the same pid→ppid
+table comes from ONE `ps -axo pid=,ppid=` snapshot. Both sources feed the identical lineage walk —
+still parent-chain only, never a name match. (Before 2026-07-08 the module was /proc-only and
+silently no-opped on Darwin.)
 """
 from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 
 
 def _ppid_of(pid: int):
-    """Parent pid from /proc/<pid>/status, or None if the proc is gone/unreadable."""
+    """Parent pid, or None if the proc is gone/unreadable. /proc on Linux, `ps` elsewhere."""
+    if os.path.isdir("/proc"):
+        try:
+            with open(f"/proc/{pid}/status", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        return int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+        return None
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("PPid:"):
-                    return int(line.split()[1])
-    except (OSError, ValueError, IndexError):
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     return None
 
@@ -47,9 +62,38 @@ def _all_pids() -> list:
         return []
 
 
+def _pid_ppid_snapshot() -> dict:
+    """One pid→ppid snapshot of the live process table. /proc where it exists; else a single
+    `ps -axo pid=,ppid=` call (macOS/BSD). Pure lineage data — no names are read at all."""
+    if os.path.isdir("/proc"):
+        table: dict = {}
+        for pid in _all_pids():
+            pp = _ppid_of(pid)
+            if pp is not None:
+                table[pid] = pp
+        return table
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if out.returncode != 0:
+        return {}
+    table = {}
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                table[int(parts[0])] = int(parts[1])
+            except ValueError:
+                continue
+    return table
+
+
 def descendants(root_pid: int) -> list:
-    """All live descendants of root_pid (root itself EXCLUDED), by ppid lineage. A /proc snapshot at
-    call time. NEVER matches by name — pure parent-chain, so it can only reach root_pid's own tree.
+    """All live descendants of root_pid (root itself EXCLUDED), by ppid lineage. A process-table
+    snapshot at call time (/proc, or `ps` where /proc is absent). NEVER matches by name — pure
+    parent-chain, so it can only reach root_pid's own tree.
 
     Capture this BEFORE killing root: once root dies its children reparent (ppid → init/vscode) and
     the lineage is erased, so a post-kill walk would find nothing to reap."""
@@ -58,10 +102,8 @@ def descendants(root_pid: int) -> list:
         # enumerate nearly the whole box (other users included). A real agent root is a Popen pid ≥2.
         return []
     children: dict = {}
-    for pid in _all_pids():
-        pp = _ppid_of(pid)
-        if pp is not None:
-            children.setdefault(pp, []).append(pid)
+    for pid, pp in _pid_ppid_snapshot().items():
+        children.setdefault(pp, []).append(pid)
     out, seen = [], set()
     stack = list(children.get(root_pid, []))
     while stack:

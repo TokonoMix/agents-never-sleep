@@ -20,6 +20,9 @@ Cases:
 
 Exit 0 = GREEN.
 """
+# py3.9 compat (requires-python >= 3.9): PEP 604 annotations must not evaluate at def time.
+from __future__ import annotations
+
 import json
 import os
 import shutil

@@ -7,53 +7,19 @@
 #   * narrowly scoped: it does NOT block the harness's own reversibility ops (local `git reset
 #     --hard` / `git clean` inside a repo) — only destructive/outward things.
 #
+# This file used to keep its own bash case/glob copy of the irreversible pattern list, which could
+# drift from the Python copy every other platform's hook shares. It now delegates the actual decision
+# to `agents_never_sleep.enforcement` (the single source of truth) via the same cross-platform
+# dispatcher every non-Claude hook already calls (hooks/enforce.sh) — there is only one pattern list
+# left to maintain, and it is regex-based (robust to whitespace, flag reordering/bundling, and
+# long- vs short-flag spelling; see enforcement.py's docstring for what it still can't catch).
+#
 # Hook contract: reads the PreToolUse JSON on stdin, prints a deny decision to block, exits 0 to allow.
 set -euo pipefail
 
-# Inert outside unattended runs.
-if [[ "${CLAUDE_UNATTENDED:-}" != "1" ]]; then
-  exit 0
-fi
-
-payload="$(cat)"
-
-# Pull tool name + the command/string fields we care about (Bash command, file paths).
-read -r tool cmd <<EOF
-$(printf '%s' "$payload" | python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    print("UNKNOWN ");sys.exit(0)
-ti=d.get("tool_input") or {}
-blob=" ".join(str(ti.get(k,"")) for k in ("command","content","new_string","file_path","path","url"))
-print(d.get("tool_name","UNKNOWN"), blob.replace("\n"," "))
-')
-EOF
-
-deny() {
-  printf '%s' "$payload" >/dev/null
-  cat <<JSON
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"agents-never-sleep: blocked an irreversible/outward action ($1). Park it for human review instead."}}
-JSON
-  exit 0
-}
-
-# Irreversible / outward patterns. Deliberately NOT matching local `git reset --hard` / `git clean`
-# (those are the harness's revert mechanism inside a working tree).
-shopt -s nocasematch
-case "$cmd" in
-  *"git push"*"--force"*|*"git push"*" -f"*|*"git push"*"--force-with-lease"*) deny "force-push" ;;
-  *"git push"*":"*|*"git push"*"--delete"*)                                    deny "remote branch/tag delete" ;;
-  *"git push --mirror"*)                                                         deny "mirror push" ;;
-  *"rm -rf /"*|*"rm -rf ~"*|*"rm -rf \$HOME"*)                                   deny "recursive delete of a root/home path" ;;
-  *"drop database"*|*"drop table"*|*"truncate table"*)                          deny "destructive SQL" ;;
-  *"mkfs"*|*" dd "*"of=/dev/"*|*"shred "*)                                       deny "disk-destructive command" ;;
-  *"vault delete"*|*"vault kv delete"*|*"vault kv destroy"*)                     deny "Vault secret deletion" ;;
-  *"vault kv put"*|*"vault write"*"rotate"*)                                     deny "Vault secret write/rotate" ;;
-  *"sendmail"*|*"mailx"*|*" mail -s"*)                                           deny "sending real email" ;;
-  *"systemctl stop"*|*"systemctl disable"*|*"docker rm "*|*"docker volume rm"*)  deny "service/volume teardown" ;;
-esac
-
-# Default: allow.
+cd "$(dirname "$0")/.." 2>/dev/null || exit 0   # skill root = parent of hooks/, for `python3 -m`
+# NOT `set -e`/`exec`-guarded: a broken install (python missing, import error) must FAIL OPEN, never
+# wedge a tool call. `enforce.py claude pre_tool` only ever intentionally exits 0 either way (the
+# decision is carried in stdout JSON, not the exit code) — force 0 regardless so a crash can't wedge.
+python3 -m agents_never_sleep.enforce claude pre_tool
 exit 0

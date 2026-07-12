@@ -126,7 +126,7 @@ Read the JSON `status`:
 - **`PROCEED`** → implement ONLY `ticket.body` by editing files in the repo (do NOT touch other
   tickets, do NOT stop, do NOT ask). Then call `complete`:
   ```
-  python3 -m agents_never_sleep.run complete --repo <project> --attempted "one-line summary of what you did"
+  python3 -m agents_never_sleep.run complete --repo <project> --tickets <dir-of-.md-tickets> --attempted "one-line summary of what you did"
   ```
   Use `--cannot-implement` (with `--attempted` explaining why) if you genuinely cannot do it — the
   harness reverts your partial edits and records BLOCKED_ENV. After `complete`, call `next` again.

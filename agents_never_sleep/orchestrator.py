@@ -22,6 +22,7 @@ import os
 
 from . import gate_cache
 from .decide import Action, Decision, classify
+from .fsutil import ensure_private_dir
 from .gates import GateResult, GateRunner
 from .state import OutcomeState, OutcomeStore, TicketOutcome
 from .vcs import Git, GitError
@@ -291,7 +292,7 @@ class Orchestrator:
         BLOCKED_ENV honestly. When a council is configured, a PASSED gate on a high-risk DIFF whose
         council raised concerns / errored / wasn't run is recorded DONE_LOW_CONFIDENCE (needs daylight
         review) rather than a silent DONE — the council never blocks the run, only the trust upgrade."""
-        os.makedirs(self.artifacts_dir, exist_ok=True)
+        ensure_private_dir(self.artifacts_dir)
 
         if cannot_implement:
             self.git.revert_to(token.snapshot)
@@ -456,7 +457,7 @@ class Orchestrator:
     # ---- the in-process loop (acceptance demo / DemoWorker) ------------------------------
 
     def run(self, tickets: list) -> RunResult:
-        os.makedirs(self.artifacts_dir, exist_ok=True)
+        ensure_private_dir(self.artifacts_dir)
 
         has_safety_net = self.git.ensure_safety_net()
         outcomes: list = []

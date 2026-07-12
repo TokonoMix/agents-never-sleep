@@ -18,7 +18,10 @@ from __future__ import annotations
 import dataclasses
 import enum
 import os
+import shlex
 import subprocess
+
+from .redact import known_secret_env_var_names
 
 
 class GateResult(str, enum.Enum):
@@ -51,6 +54,16 @@ _NONINTERACTIVE_ENV = {
 
 def _run_command(command: list[str], cwd: str, timeout: int) -> tuple[int, str, bool]:
     env = dict(os.environ)
+    # L2 (post-audit): a `vault:`/`env:` token-ref's whole point is keeping the key OUT of the
+    # environment; `run.py` resolves it back into os.environ for its own in-process consumers
+    # (onboarding gate, council), but the GATE COMMAND is the target repo's own (arbitrary,
+    # untrusted) test/build command — it has no legitimate need to inherit ANS's own gateway keys,
+    # and widening what it can see only widens what a compromised/careless gate could leak. Strip
+    # ANS's own resolved-credential env vars here, at the one place they'd otherwise leak into a
+    # spawned subprocess; resolved-but-unknown-named secrets stay covered by redact.py at the
+    # output boundary regardless.
+    for name in known_secret_env_var_names():
+        env.pop(name, None)
     env.update(_NONINTERACTIVE_ENV)
     try:
         proc = subprocess.run(
@@ -66,8 +79,12 @@ def _run_command(command: list[str], cwd: str, timeout: int) -> tuple[int, str, 
 
 
 class GateRunner:
-    def __init__(self, command: list[str], cwd: str, timeout: int = 120):
-        self.command = command
+    def __init__(self, command: list[str] | str, cwd: str, timeout: int = 120):
+        # A config-authored gate command is natural JSON as a single string (e.g. "bash gate.sh");
+        # subprocess.run needs argv, so split it exactly like launcher.py's agent-cmd normalization
+        # (_as_argv) does — a bare string handed straight through makes subprocess treat the whole
+        # line as one executable name and raise FileNotFoundError (2026-07-08 E2E, second session).
+        self.command = shlex.split(command) if isinstance(command, str) else list(command)
         self.cwd = cwd
         self.timeout = timeout
 

@@ -15,6 +15,8 @@ import json
 import os
 import tempfile
 
+from .fsutil import ensure_private_dir
+
 
 def failure_signature(text: str) -> str:
     """A stable fingerprint of WHAT failed, robust to volatile noise.
@@ -63,7 +65,7 @@ class AttemptLedger:
         self._data.setdefault("f5_attempted", {})
 
     def _flush(self) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        ensure_private_dir(os.path.dirname(self.path))
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path) or ".", prefix=".ledger-")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self._data, fh, indent=2, sort_keys=True)

@@ -22,9 +22,26 @@ import dataclasses
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 _DEFAULT_VAULT_ADDR = "http://127.0.0.1:8200"
+
+
+def is_safe_endpoint(url: str) -> bool:
+    """True when a credential can travel to `url` without ADDITIONAL risk: loopback (the request
+    never leaves the host) or https (encrypted in transit). Anything else — a non-loopback plain
+    http:// endpoint — puts the resolved secret on the wire in cleartext (L5, post-audit). The
+    shipped defaults are loopback (`http://127.0.0.1:8200`), so this is silent out of the box; it
+    only fires once an operator points `VAULT_ADDR` / `integrations.paperclip.base_url` at a
+    remote host."""
+    try:
+        parsed = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return False
+    if parsed.scheme == "https":
+        return True
+    return (parsed.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
 
 
 class VaultError(Exception):
@@ -144,8 +161,15 @@ def resolve_ref(ref: str | None, *, config: dict, client: VaultClient | None = N
             return Resolved(None, "absent",
                             f"vault token_ref {path!r} configured but no VAULT_TOKEN / "
                             f"VAULT_ROLE_ID+VAULT_SECRET_ID in env to authenticate")
+        # L5 (post-audit): a non-loopback, non-https VAULT_ADDR puts the auth material AND the
+        # resolved secret on the wire in cleartext. Not a hard-fail (Vault reads degrade, never
+        # crash the run) — a blind spot on an otherwise-successful read, same as any other
+        # noteworthy-but-non-fatal condition here.
+        endpoint_spot = (None if is_safe_endpoint(client.addr) else
+                         f"VAULT_ADDR {client.addr!r} is neither loopback nor https — the vault "
+                         f"token_ref {path!r} traveled over the network in cleartext")
         try:
-            return Resolved(_reg(client.read_kv(path, field)), "vault", None)
+            return Resolved(_reg(client.read_kv(path, field)), "vault", endpoint_spot)
         except VaultError as exc:
             return Resolved(None, "absent", f"vault read failed for {path!r}: {exc}")
 

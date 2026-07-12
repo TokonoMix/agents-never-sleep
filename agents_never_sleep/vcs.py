@@ -73,25 +73,34 @@ class Git:
 
     def _ensure_gitignore(self) -> None:
         """Make sure the harness's own dirs are gitignored, so `git add -A` never tracks them
-        (and therefore a snapshot never carries run state, and reset --hard never reverts it)."""
+        (and therefore a snapshot never carries run state, and reset --hard never reverts it).
+
+        Raises GitError (never a raw OSError) when .gitignore cannot be read/appended — e.g. a
+        read-only working tree. Callers already route GitError to their degrade paths
+        (ensure_safety_net -> no net -> clean HALT; commit_all -> BLOCKED_ENV); a raw
+        PermissionError here crashed `next` with a traceback instead (2026-07-08 E2E, 2.1)."""
         if not self.protect:
             return
         gi = os.path.join(self.cwd, ".gitignore")
-        existing = ""
-        if os.path.exists(gi):
-            with open(gi, "r", encoding="utf-8") as fh:
-                existing = fh.read()
-        lines = set(existing.splitlines())
-        want = [f"{p}/" for p in self.protect]
-        missing = [w for w in want if w not in lines]
-        if not missing:
-            return
-        with open(gi, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write("# agents-never-sleep harness bookkeeping (do not commit)\n")
-            for w in missing:
-                fh.write(w + "\n")
+        try:
+            existing = ""
+            if os.path.exists(gi):
+                with open(gi, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            lines = set(existing.splitlines())
+            want = [f"{p}/" for p in self.protect]
+            missing = [w for w in want if w not in lines]
+            if not missing:
+                return
+            with open(gi, "a", encoding="utf-8") as fh:
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write("# agents-never-sleep harness bookkeeping (do not commit)\n")
+                for w in missing:
+                    fh.write(w + "\n")
+        except OSError as exc:
+            raise GitError(f"cannot update .gitignore to protect harness dirs "
+                           f"({type(exc).__name__}: {exc})") from exc
 
     def ensure_safety_net(self) -> bool:
         """Return True if a reversibility safety net exists or could be created.
@@ -101,7 +110,15 @@ class Git:
         must HALT or restrict to non-destructive work.
         """
         if self.is_repo():
-            self._ensure_gitignore()
+            try:
+                self._ensure_gitignore()
+            except GitError:
+                # The protection cannot be established (typically a read-only working tree, where
+                # snapshot/commit/revert cannot work either): without it a snapshot would sweep the
+                # harness's own state dirs into commits and a revert would wipe them. Report "no
+                # safety net" so classify HALTs destructive work cleanly instead of proceeding on a
+                # net that is not actually there.
+                return False
             return True
         try:
             if self._run("init").returncode != 0:

@@ -25,6 +25,64 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   destructive checkout, and any recoverable work-in-progress from the prior run is surfaced as a
   backup reference so it can be recovered rather than lost.
 
+### Fixed — 2026-07-08 E2E follow-up findings (third pass)
+- **A read-only repo with a REAL project no longer tracebacks.** With a committed config and at
+  least one ticket — so `next` gets past the early NON_DESTRUCTIVE exit and into the driver —
+  two unprotected writes still crashed with a raw `PermissionError` (exit 1):
+  `Git._ensure_gitignore`'s bare `open(gi, "a")` (vcs.py) and `_set_sentinel`'s bare
+  `os.makedirs` (driver.py; the sentinel is pinned to the Stop-hook's repo-relative path, so the
+  state-dir redirect never covered it). Now: a failed `.gitignore` update raises `GitError` and
+  `ensure_safety_net` reports **no safety net** (the protection against snapshots sweeping
+  harness state cannot be established), so classify HALTs cleanly — `status: HALTED`, exit 0;
+  the sentinel write/remove degrade to blind-spot notes (never-stop is inactive either way,
+  since the Stop-hook reads a path the harness cannot write). `_resolve_writable_state_dirs`
+  additionally probes an ACTUAL write: `makedirs(exist_ok=True)` succeeds on an existing
+  read-only dir, so the "ran while writable, then locked" case previously skipped the redirect
+  and died on the first state write.
+- **Crash-recovery revert is lineage-guarded — the stale-resume HALT's own recovery
+  instruction no longer corrupts the fresh run.** After `HALT_RESUME_UNSAFE`, removing
+  `run-branch.json` and calling `next` forked a fresh run branch correctly, but the separate
+  pending-checkpoint recovery then ran `git reset --hard` to the OLD run's `pending.snapshot`
+  with no ancestry check — silently grafting the fresh branch onto the prior run's disconnected
+  lineage (exit 0, `PROCEED`); the corruption only surfaced on the NEXT call as a second,
+  seemingly unrelated HALT. The recovery now resets to `pending.snapshot` only when it is an
+  ancestor of the current checkout; a stale checkpoint is instead discarded — carried-over
+  partial edits are set aside via the current-tip revert (recoverable `refs/ans-backup/*` ref),
+  a blind-spot note records it, and the ticket is re-scheduled under its attempt cap.
+- New regressions: `test_halt_readonly_repo_realistic_project` (fresh + warm, via the installed
+  CLI path) in `acceptance/test_hardening.py`;
+  `test_recovery_after_stale_halt_does_not_graft_old_lineage` in
+  `acceptance/test_run_branch_freshness.py`. Both confirmed RED against the pre-fix sources
+  (`git stash`), GREEN after; full suite GREEN on stock py3.9.6 and py3.12.
+
+### Fixed — 2026-07-08 E2E review findings
+- **Sentinel path guard compares directory identity, not spelling.** `next`'s unattended
+  CWD-vs-`--repo` hard-fail used a string compare (`abspath`), so a `--repo` passed through a
+  symlink — the macOS default, where TMPDIR lives under `/var/folders`, a symlink to
+  `/private/var/folders` — spuriously exited 2 even when CWD *was* the repo. Now compared via
+  `realpath` (identity); path construction elsewhere intentionally stays `abspath`.
+- **A terminal signal survives an unwritable repo root.** `driver._terminate` crashed with an
+  unhandled `PermissionError` writing the night report in a read-only repo — exactly the
+  flagship no-safety-net HALT case — breaking the agent-facing JSON contract. The report write
+  now degrades: fallback to the state dir, else `report_path: null` + a `report_error` note;
+  the HALTED/DRAINED JSON is always emitted.
+- **Leaked-process reaping now works on macOS/BSD.** `reap.py` was `/proc`-only, so on Darwin
+  `descendants()` silently returned `[]` (no-op reaper, permanently-red `test_reap`). Where
+  `/proc` is absent the same pid→ppid table now comes from one `ps -axo pid=,ppid=` snapshot —
+  still pure parent-chain lineage, never a name match.
+- **One ERROR exit-code convention.** `complete` and `resolve-park` returned exit 0 with
+  `status: "ERROR"` (e.g. an attempt-id mismatch); they now exit 2 like `next`'s sentinel
+  hard-fail, so scripts can trust the exit code as well as the JSON.
+- **py3.9 really is supported by the test suite.** Four acceptance suites used PEP 604
+  annotations evaluated at def time and crashed on import under Python 3.9
+  (`requires-python >= 3.9`); they now carry `from __future__ import annotations`.
+- **`run_all.sh` no longer runs the pytest-marked integration test.** `test_real_claude.py`
+  (real `claude -p`, needs pytest + credentials; out of the hermetic suite by its own header)
+  is skipped with a pointer to `pytest -m integration`.
+- **Docs: `complete` examples carry `--tickets`.** README/SKILL showed `complete` without
+  `--tickets`, which errors whenever the tickets dir is not `<repo>/tickets`. README version
+  pointers refreshed 1.0.0 → 1.3.0.
+
 ## [1.3.0] — 2026-07-08
 
 ### Added — keyless first-run Tokonomix onboarding offer (MINOR, additive)

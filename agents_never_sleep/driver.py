@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 
+from .fsutil import ensure_private_dir
 from .orchestrator import BAD_STATES, Orchestrator, ProceedToken
 from .vcs import GitError
 from .decide import Action
@@ -65,7 +66,7 @@ def live_tree_decision(is_linked: bool, is_clean: bool, policy) -> str:
 
 
 def _atomic_write_json(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    ensure_private_dir(os.path.dirname(path))
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -247,14 +248,32 @@ class StepDriver:
     # ---- sentinel ownership -------------------------------------------------------------
 
     def _set_sentinel(self) -> None:
-        os.makedirs(os.path.dirname(self.sentinel_path), exist_ok=True)
-        if not os.path.exists(self.sentinel_path):
-            with open(self.sentinel_path, "w", encoding="utf-8") as fh:
-                fh.write("run in progress\n")
+        # The sentinel is pinned to the Stop-hook's path (usually inside the repo — see __init__),
+        # NOT to state_dir, so the read-only-repo state-dir redirect cannot cover it. An unwritable
+        # repo must degrade to a blind-spot note, not crash `next` with a raw PermissionError
+        # (2026-07-08 E2E, 2.1): writing it anywhere else is pointless anyway — the Stop-hook only
+        # reads THIS path, so never-stop is inactive either way.
+        try:
+            ensure_private_dir(os.path.dirname(self.sentinel_path))
+            if not os.path.exists(self.sentinel_path):
+                with open(self.sentinel_path, "w", encoding="utf-8") as fh:
+                    fh.write("run in progress\n")
+        except OSError as exc:
+            self.key_blind_spots.append(
+                f"run-incomplete sentinel could not be written at {self.sentinel_path!r} "
+                f"({exc}) — the Stop-hook never-stop guard is INACTIVE for this run and every "
+                "`next` call will look like a fresh run start")
 
     def _clear_sentinel(self) -> None:
-        if os.path.exists(self.sentinel_path):
-            os.unlink(self.sentinel_path)
+        try:
+            if os.path.exists(self.sentinel_path):
+                os.unlink(self.sentinel_path)
+        except OSError as exc:
+            # A sentinel that survives the terminal keeps the Stop-hook blocking stops after the
+            # run is over — surface it instead of crashing the terminal JSON (read-only repo case).
+            self.key_blind_spots.append(
+                f"run-incomplete sentinel at {self.sentinel_path!r} could not be removed ({exc}) "
+                "— the Stop-hook may keep blocking agent stops until it is deleted manually")
 
     # ---- per-session ticket budget (opt-in fresh-session-per-N-tickets) -----------------
     # Active ONLY when UE_SESSION_TICKET_BUDGET is set by the launcher. Counts RECORDED ticket
@@ -288,11 +307,11 @@ class StepDriver:
         except (OSError, ValueError):
             count = 0
         count += 1
-        os.makedirs(os.path.dirname(self.session_count_path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(self.session_count_path))
         with open(self.session_count_path, "w", encoding="utf-8") as fh:
             fh.write(str(count))
         if count >= budget:
-            os.makedirs(os.path.dirname(self.session_marker_path), exist_ok=True)
+            ensure_private_dir(os.path.dirname(self.session_marker_path))
             with open(self.session_marker_path, "w", encoding="utf-8") as fh:
                 fh.write(f"session reached {count}/{budget} tickets\n")
             return True
@@ -714,12 +733,33 @@ class StepDriver:
             work_branch=(run_branch if done else None),
             backup_refs=backup_refs,
         )
-        with open(self.report_path, "w", encoding="utf-8") as fh:
-            fh.write(report)
-        return {"status": status, "reason": reason, "report_path": self.report_path,
-                "processed": len(outcomes), "done": done, "run_branch": run_branch,
-                "message": f"backlog {status}; report written to {self.report_path}"
-                           + (f"; work on branch {run_branch}" if run_branch and done else "")}
+        # The terminal JSON is the agent-facing contract — it must reach the agent even when
+        # the repo root is unwritable (read-only fs is the flagship HALT case, so the report
+        # write fails in exactly the scenario that needs the HALTED signal most). Degrade:
+        # fall back to the (usually still-writable) state dir, else report_path=null with an
+        # explanatory note — never an unhandled traceback (2026-07-08 E2E finding).
+        report_path, report_error = self.report_path, None
+        try:
+            with open(report_path, "w", encoding="utf-8") as fh:
+                fh.write(report)
+        except OSError as exc:
+            report_error = str(exc)
+            fallback = os.path.join(self.state_dir, os.path.basename(self.report_path))
+            try:
+                with open(fallback, "w", encoding="utf-8") as fh:
+                    fh.write(report)
+                report_path = fallback
+            except OSError:
+                report_path = None
+        out = {"status": status, "reason": reason, "report_path": report_path,
+               "processed": len(outcomes), "done": done, "run_branch": run_branch,
+               "message": (f"backlog {status}; report written to {report_path}"
+                           if report_path else
+                           f"backlog {status}; report could NOT be written ({report_error})")
+                          + (f"; work on branch {run_branch}" if run_branch and done else "")}
+        if report_error:
+            out["report_error"] = report_error
+        return out
 
     # ---- the two entry points the agent calls -------------------------------------------
 
@@ -786,7 +826,28 @@ class StepDriver:
                 # already reverted — re-reverting to the snapshot is idempotent). Discard any partial
                 # edits and let the ticket be re-scheduled under its attempt cap.
                 try:
-                    self.orch.git.revert_to(pending.snapshot)
+                    git = self.orch.git
+                    cur = git.head()
+                    if cur and git.object_exists(pending.snapshot) \
+                            and git.is_ancestor(pending.snapshot, cur):
+                        git.revert_to(pending.snapshot)
+                    else:
+                        # Lineage guard: pending.json survived from a PRIOR run this checkout does
+                        # not descend from — e.g. the operator cleared a stale run-branch.json after
+                        # a HALT_RESUME_UNSAFE and a fresh run branch was just forked. `reset --hard`
+                        # to that snapshot would silently graft the fresh branch onto the old run's
+                        # disconnected history (and make the NEXT call HALT on the freshness check).
+                        # Instead discard the carried-over partial edits WITHOUT leaving this lineage
+                        # (revert to the current tip; dirty WIP is set aside as a backup ref) and let
+                        # the ticket be re-scheduled under its attempt cap.
+                        if cur and git.object_exists(cur):
+                            git.revert_to(cur)
+                        self.key_blind_spots.append(
+                            f"stale pending checkpoint for {pending.ticket_id} discarded: its "
+                            f"snapshot {pending.snapshot!r} is not an ancestor of the current "
+                            "checkout (leftover from a prior interrupted run); any carried-over "
+                            "partial edits were set aside as a recoverable backup ref and the "
+                            "ticket will be re-attempted under its attempt cap")
                     self._clear_pending()
                 except GitError as exc:
                     # The backup-before-revert failed (broken git/env), so revert_to ABORTED to

@@ -537,6 +537,22 @@ def test_cli_resolve_park_round_trip(failures):
     if not attempt_id:
         failures.append(f"[cli] `next` offer missing attempt_id: {offer}")
         return
+    # A mismatched attempt-id must be REFUSED with status ERROR + exit 2 (the one exit-code
+    # convention for every subcommand's ERROR, matching `next`'s sentinel hard-fail) — and the
+    # refusal must NOT consume the outstanding offer: the real resolve below still works.
+    bad = subprocess.run([sys.executable, "-m", "agents_never_sleep.run", "resolve-park",
+                          *common, "--ticket-id", "t-cli", "--attempt-id", "deadbeef00000000",
+                          "--resolved", "--chosen-reading", "x", "--evidence", "y",
+                          "--dissent-count", "0", "--synthesis-text", "z"],
+                         cwd=repo, env=env, capture_output=True, text=True, timeout=60)
+    if bad.returncode != 2:
+        failures.append(f"[cli] mismatched attempt-id: expected exit 2, got {bad.returncode} "
+                        f"({bad.stdout!r})")
+    try:
+        if json.loads(bad.stdout).get("status") != "ERROR":
+            failures.append(f"[cli] mismatched attempt-id: expected status ERROR, got {bad.stdout!r}")
+    except json.JSONDecodeError:
+        failures.append(f"[cli] mismatched attempt-id: non-JSON output {bad.stdout!r}")
     resumed = _run_cli(["resolve-park", *common, "--ticket-id", "t-cli", "--attempt-id", attempt_id,
                        "--resolved", "--chosen-reading", "a status badge",
                        "--evidence", "components/Badge.tsx already renders status",

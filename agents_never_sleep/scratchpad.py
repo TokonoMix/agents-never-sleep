@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import time
 
+from .fsutil import ensure_private_dir
 from .redact import redact
 
 
@@ -45,7 +46,7 @@ def append_note(state_dir: str, ticket_id: str, text: str, *, clock=time.time) -
     agent's free text. Redaction mirrors OutcomeStore.write so a pasted key never lands here."""
     if not ticket_id:
         raise ValueError("append_note requires a ticket_id")
-    os.makedirs(state_dir, exist_ok=True)
+    ensure_private_dir(state_dir)
     path = notes_path(state_dir, ticket_id)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock()))
     body = redact((text or "").strip())

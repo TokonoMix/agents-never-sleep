@@ -464,7 +464,7 @@ until the backlog drains. Each command prints one JSON object to stdout.
 # Hand me ONE ready ticket (auto-parks ambiguous / high-blast-radius ones), or a terminal signal.
 python3 -m agents_never_sleep.run next     --repo . --tickets <dir-of-.md-tickets>
 #   …implement ONLY ticket.body by editing files in the repo…
-python3 -m agents_never_sleep.run complete --repo . --attempted "one-line summary of what you did"
+python3 -m agents_never_sleep.run complete --repo . --tickets <dir-of-.md-tickets> --attempted "one-line summary of what you did"
 #   …repeat next/complete until next returns a terminal status.
 ```
 
@@ -553,7 +553,7 @@ Five minutes from zero to a first unattended run.
    cd /path/to/project
    python3 -m agents_never_sleep.run next     --repo . --tickets ./backlog
    #   …implement the ticket it hands you…
-   python3 -m agents_never_sleep.run complete --repo . --attempted "what you did"
+   python3 -m agents_never_sleep.run complete --repo . --tickets ./backlog --attempted "what you did"
    #   …repeat until DRAINED.
    ```
 
@@ -582,7 +582,7 @@ python3 -m agents_never_sleep.run next --repo . --tickets docs/backlog
 #   …you (the agent) implement only that ticket…
 
 # Record the outcome (gate runs here)
-python3 -m agents_never_sleep.run complete --repo . --attempted "added token-bucket limiter + tests"
+python3 -m agents_never_sleep.run complete --repo . --tickets docs/backlog --attempted "added token-bucket limiter + tests"
 # → {"status":"RECORDED","ticket_id":"add-rate-limit","state":"DONE","next":"call `next`"}
 
 # Loop until DRAINED / HALTED / LOW_YIELD, then read the report
@@ -885,7 +885,7 @@ The full, term-by-term reference (with the module each term lives in) is in the
 ## Documentation
 
 The deep-dive docs live in [`docs/`](docs/). Each is dual-audience (a senior engineer *and* an AI system
-parsing it) and verified against the `agents_never_sleep/` source for v1.3.0.
+parsing it) and verified against the `agents_never_sleep/` source for v1.3.0 (additive releases only; see `CHANGELOG.md`).
 
 **Foundations**
 - [Manifesto](docs/manifesto.md) — the *Autonomous Execution Governance* discipline: emergence, the ten principles, design principles, the Git-analogy thesis.

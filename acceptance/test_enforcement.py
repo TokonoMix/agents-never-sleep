@@ -48,6 +48,13 @@ def test_irreversible(failures):
         ("sendmail user@x.com < body", "sending real email"),
         ("systemctl stop nginx", "service/volume teardown"),
         ("docker volume rm data", "service/volume teardown"),
+        # standard-form bypass shapes closed post-audit (H1): whitespace/reordering/bundling/long-form
+        # flags and force-via-refspec are all just as irreversible as the canonical spelling.
+        ("git push origin +main", "force-push"),
+        ("git push -qf origin main", "force-push"),
+        ("rm -r -f /", "recursive delete of a root/home path"),
+        ("rm --recursive --force /", "recursive delete of a root/home path"),
+        ("rm -r /important", "recursive delete of a root/home path"),
     ]
     for cmd, kind in deny:
         bad, k = E.is_irreversible(cmd)

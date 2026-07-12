@@ -28,6 +28,7 @@ import sys
 from . import config
 from .config import config_needs_confirmation, ensure_config, load_config, reactivate_pending_onboard
 from .driver import RunResumeUnsafe, StepDriver
+from .fsutil import ensure_private_dir
 from .gates import GateRunner
 from .heartbeat import Heartbeat
 from .ledger import AttemptLedger
@@ -47,6 +48,52 @@ def _resolve_report_path(repo: str, config: dict, args_report: str) -> str:
 
 def _unattended() -> bool:
     return bool(os.environ.get("CLAUDE_UNATTENDED")) or not sys.stdin.isatty()
+
+
+def _resolve_writable_state_dirs(repo: str, state_dir: str, artifacts_dir: str,
+                                  blind_spots: list) -> tuple[str, str]:
+    """The harness's own bookkeeping (outcome store, ledger, heartbeat, capability profile) lives
+    under <repo>/.unattended by default. A repo that is read-only end to end (a locked-down
+    working tree, a `:ro` mount) can't create that directory even when git itself still works —
+    reversibility and the harness's scratch space are independent concerns, so a blocked scratch
+    space must degrade, not crash. Before this, the very first disk write in _Context.__init__
+    (preflight.write_profile) died with an unhandled PermissionError, so the driver never got a
+    chance to run its own read-only handling (HALT / BLOCKED_ENV) (2026-07-08 E2E, second
+    session). Redirect both dirs outside the repo, keyed by the repo's own path so repeated
+    next/complete calls against the same repo keep finding the same fallback location."""
+    try:
+        ensure_private_dir(state_dir)
+        ensure_private_dir(artifacts_dir)
+        # makedirs(exist_ok=True) succeeds on an EXISTING dir even when it is read-only (the
+        # "harness ran while writable, then the tree got locked" case), so probe an actual write —
+        # otherwise the very first state write (progress/skip/outcome) still dies later with a raw
+        # PermissionError instead of taking this redirect (2026-07-08 E2E, 2.1).
+        for d in (state_dir, artifacts_dir):
+            probe = os.path.join(d, f".writable-probe-{os.getpid()}")
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("probe")
+            os.remove(probe)
+        return state_dir, artifacts_dir
+    except OSError:
+        pass
+    import hashlib
+    import tempfile
+    tag = hashlib.sha1(os.path.abspath(repo).encode("utf-8")).hexdigest()[:16]
+    base = os.path.join(tempfile.gettempdir(), f"agents-never-sleep-state-{tag}")
+    fallback_state = os.path.join(base, "state")
+    fallback_artifacts = os.path.join(base, "artifacts")
+    try:
+        ensure_private_dir(fallback_state)
+        ensure_private_dir(fallback_artifacts)
+        blind_spots.append(
+            f"repo state dir {state_dir!r} is not writable — harness bookkeeping redirected to "
+            f"{base!r} for this repo (read-only-repo degrade)")
+        return fallback_state, fallback_artifacts
+    except OSError as exc:
+        blind_spots.append(
+            f"repo state dir {state_dir!r} AND the fallback {base!r} are both unwritable "
+            f"({exc}) — harness bookkeeping cannot persist")
+        return state_dir, artifacts_dir
 
 
 def _primary_gate(config: dict, repo: str):
@@ -94,8 +141,10 @@ class _Context:
 
         self.repo = os.path.abspath(args.repo)
         self.unattended = _unattended()
-        self.state_dir = os.path.join(self.repo, args.state_dir)
-        self.artifacts_dir = os.path.join(self.repo, args.artifacts_dir)
+        self.key_blind_spots = []
+        self.state_dir, self.artifacts_dir = _resolve_writable_state_dirs(
+            self.repo, os.path.join(self.repo, args.state_dir),
+            os.path.join(self.repo, args.artifacts_dir), self.key_blind_spots)
 
         # Preflight (git probes + a Paperclip socket probe) only needs to run when there is no
         # saved config yet — its sole consumer is config creation. On every later next/complete a
@@ -126,14 +175,15 @@ class _Context:
         # Resolve a Vault-backed tokonomix key into the env the existing consumers read (the
         # onboarding gate + council both probe TOKONOMIX_API_KEY). Only when not already set; the
         # resolved value is registered for redaction. A failure degrades (no env set), never crashes.
-        self.key_blind_spots = []
         tk_ref = (self.config.get("integrations", {}).get("tokonomix", {}) or {}).get("token_ref")
         if tk_ref and not os.environ.get("TOKONOMIX_API_KEY"):
             from .keysource import resolve_ref
             r = resolve_ref(tk_ref, config=self.config)
             if r.value:
                 os.environ["TOKONOMIX_API_KEY"] = r.value
-            elif r.blind_spot:
+            # Not `elif`: a SUCCESSFUL resolution can still carry a blind spot (e.g. L5's
+            # non-loopback/non-https vault endpoint warning) — surface it either way.
+            if r.blind_spot:
                 self.key_blind_spots.append(r.blind_spot)
 
         # Fallback: if TOKONOMIX_API_KEY is still unset (token_ref null or unresolved), read it
@@ -222,6 +272,25 @@ def _emit(obj: dict, code: int = 0) -> int:
     return code
 
 
+def _error_code(out) -> int:
+    """Exit code for a driver result: `status: ERROR` exits 2, matching cmd_next's sentinel
+    hard-fail — one convention for every subcommand, so a scripting agent can trust the exit
+    code as well as the JSON (2026-07-08 E2E: resolve-park's attempt-id-mismatch ERROR exited 0)."""
+    return 2 if isinstance(out, dict) and out.get("status") == "ERROR" else 0
+
+
+def _note_unsafe_paperclip_endpoint(ctx, pc_cfg: dict) -> None:
+    """L5 (post-audit): a non-loopback, non-https base_url puts the bearer token on the wire in
+    cleartext on every request. Not a hard-fail (the shipped default is loopback, so this is silent
+    out of the box) — a blind spot, same treatment as an unresolved token."""
+    from .keysource import is_safe_endpoint
+    base_url = pc_cfg.get("base_url") or ""
+    if base_url and not is_safe_endpoint(base_url):
+        ctx.key_blind_spots.append(
+            f"integrations.paperclip.base_url {base_url!r} is neither loopback nor https — the "
+            "Paperclip bearer token travels over the network in cleartext on every request")
+
+
 def _load_paperclip_tickets_for(ctx) -> list | None:
     """If Paperclip is configured, pull open issues as tickets; else None (fall back to local .md)."""
     pc_cfg = (ctx.config.get("integrations", {}).get("paperclip", {}) or {})
@@ -233,6 +302,7 @@ def _load_paperclip_tickets_for(ctx) -> list | None:
         print(f"[agents-never-sleep] Paperclip enabled but token unresolved: {reason} — "
               "falling back to local tickets.", file=sys.stderr)
         return None
+    _note_unsafe_paperclip_endpoint(ctx, pc_cfg)
     from .sources.paperclip import PaperclipClient, to_ticket
     ctx.paperclip = PaperclipClient(pc_cfg["base_url"], resolved.value, pc_cfg["company_id"],
                                     write_enabled=bool(pc_cfg.get("write_enabled")))
@@ -268,6 +338,7 @@ def _init_paperclip_write_for(ctx) -> None:
               f"({resolved.blind_spot or 'no token'}) — per-ticket status-sync degraded to a "
               "blind spot (work still completes).", file=sys.stderr)
         return
+    _note_unsafe_paperclip_endpoint(ctx, pc_cfg)
     from .sources.paperclip import PaperclipClient
     ctx.paperclip = PaperclipClient(pc_cfg["base_url"], resolved.value, pc_cfg["company_id"],
                                     write_enabled=bool(pc_cfg.get("write_enabled")))
@@ -313,12 +384,19 @@ def _sentinel_path_ok(ctx: "_Context") -> bool:
     """The Stop-hook checks ${UE_RUN_INCOMPLETE:-$PWD/.unattended/run-incomplete}; the driver writes
     the same env-or-repo path. They agree automatically only when UE_RUN_INCOMPLETE is set OR the
     agent's CWD equals --repo. Otherwise never-stop silently breaks — so this is a HARD failure in
-    unattended mode, not a warning."""
+    unattended mode, not a warning.
+
+    Compared by directory IDENTITY (realpath), not spelling: getcwd() is always the physical
+    path, while --repo may arrive through a symlink — the macOS default, where TMPDIR lives
+    under /var/folders, a symlink to /private/var/folders. A string compare would hard-fail a
+    run whose CWD *is* the repo. (The Stop-hook's $PWD is physical too, so when this check
+    passes the hook and driver agree on the same real file.) Path CONSTRUCTION elsewhere stays
+    abspath on purpose — see cmd_note — only this identity check resolves symlinks."""
     if not ctx.unattended:
         return True
     if os.environ.get("UE_RUN_INCOMPLETE"):
         return True
-    return os.path.abspath(os.getcwd()) == ctx.repo
+    return os.path.realpath(os.getcwd()) == os.path.realpath(ctx.repo)
 
 
 _TERMINAL = {"DRAINED", "HALTED", "LOW_YIELD", "STOPPED_CREDITS"}
@@ -443,7 +521,7 @@ def cmd_complete(args) -> int:
     pcp = _push_paperclip(ctx)
     if isinstance(out, dict) and pcp is not None:
         out["paperclip"] = pcp
-    return _emit(out)
+    return _emit(out, code=_error_code(out))
 
 
 def cmd_resolve_park(args) -> int:
@@ -460,7 +538,7 @@ def cmd_resolve_park(args) -> int:
     if isinstance(out, dict):
         out.setdefault("repo_abs", ctx.repo)
         out.setdefault("tickets_abs", getattr(ctx, "tickets_dir", None))
-    return _emit(out)
+    return _emit(out, code=_error_code(out))
 
 
 def cmd_reset_attempts(args) -> int:
@@ -671,7 +749,7 @@ def main(argv=None) -> int:
         try:
             repo = os.path.abspath(getattr(args, "repo", ".") or ".")
             sd = os.path.join(repo, getattr(args, "state_dir", None) or ".unattended/state")
-            os.makedirs(sd, exist_ok=True)
+            ensure_private_dir(sd)
             with open(os.path.join(sd, "resume-halt"), "w", encoding="utf-8") as fh:
                 fh.write(str(exc) + "\n")
         except OSError:

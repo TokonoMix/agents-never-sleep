@@ -20,12 +20,22 @@ from agents_never_sleep.reap import descendants, reap_tree, _ppid_of  # noqa: E4
 
 
 def _state(pid: int) -> str:
-    """Process state char from /proc, or '' if gone. 'Z' = zombie = effectively dead."""
+    """Process state char, or '' if gone. 'Z' = zombie = effectively dead.
+    /proc on Linux; `ps -o state=` where /proc does not exist (macOS/BSD) — the same
+    dual-source rule the reap module itself follows."""
+    if os.path.isdir("/proc"):
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
+                return fh.read().rsplit(")", 1)[-1].split()[0]
+        except (OSError, IndexError):
+            return ""
     try:
-        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
-            return fh.read().rsplit(")", 1)[-1].split()[0]
-    except (OSError, IndexError):
+        out = subprocess.run(["ps", "-o", "state=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
         return ""
+    state = out.stdout.strip()
+    return state[:1] if out.returncode == 0 and state else ""
 
 
 def _alive(pid: int) -> bool:
@@ -36,7 +46,10 @@ def _alive(pid: int) -> bool:
 def test_descendants_and_reap_parent_chain_only(failures):
     # root sh forks a CHILD sh that forks a grandchild sleep (proves multi-level walk), plus a
     # second direct sleep; `wait` keeps root alive. A SAME-NAMED `sleep` runs OUTSIDE the tree.
-    root = subprocess.Popen(["sh", "-c", "sh -c 'sleep 300' & sleep 300 & wait"])
+    # The inner sh runs `sleep 300 & wait` (compound), NOT a bare `sleep 300`: a single simple
+    # command lets sh EXEC itself into the sleep (macOS /bin/sh does), collapsing the middle
+    # level — the compound form forces a real 3-node tree on every platform.
+    root = subprocess.Popen(["sh", "-c", "sh -c 'sleep 300 & wait' & sleep 300 & wait"])
     outside = subprocess.Popen(["sleep", "300"])   # same command name, different lineage
     try:
         tree = []

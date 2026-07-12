@@ -68,6 +68,17 @@ def test_patterns(failures):
         "vault": "hvs.CAESIJ0123456789ABCDEFGHIJ",
         "url": "postgres://paperclip:supersecretpw@localhost:5432/paperclip",
         "pem": "-----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY-----",
+        # Post-audit additions (M2): common provider shapes + generic keyword-anchored assignment.
+        # Built via concatenation, not a literal contiguous token: these are fixture/test values
+        # (no real credential exists anywhere in this repo, per the module's own design note) but
+        # the SHAPE alone is enough to trip GitHub push-protection's provider secret scanners, which
+        # match on shape, not on realness.
+        "stripe": "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+        "google": "AIza" + "SyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY",
+        "sendgrid": "SG." + "actualvaluesegment1" + "." + "actualvaluesegment2xyzabc",
+        "twilio": "SK" + "0123456789abcdef0123456789abcdef",
+        "generic-pwd": "MYSQL_PWD=SuperSecretDbPass123",
+        "generic-secret-colon": "DB_PASSWORD: another-real-secret-99",
     }
     for label, blob in cases.items():
         red = R.redact(f"prefix {blob} suffix")
@@ -78,6 +89,33 @@ def test_patterns(failures):
             failures.append(f"[pattern:url] over-redacted the non-secret URL parts: {red!r}")
         if label == "url" and "supersecretpw" in red:
             failures.append("[pattern:url] password survived")
+
+
+def test_generic_keyword_assignment_bounds(failures):
+    """The generic password/secret/token/api-key=value rule (M2) is deliberately narrow: it must
+    catch SCREAMING_SNAKE_CASE env-var leaks (MYSQL_PWD=..., DB_PASSWORD: ...) without sliding back
+    into the keyword-proximity over-match the module's design note explicitly rejects."""
+    must_redact = [
+        "MYSQL_PWD=SuperSecretDbPass123",
+        "DB_PASSWORD: another-real-secret-99",
+        "API_SECRET=abcdefgh12345678",
+    ]
+    for line in must_redact:
+        red = R.redact(line)
+        if "[REDACTED:credential]" not in red:
+            failures.append(f"[generic-bounds] should redact {line!r}, got {red!r}")
+
+    must_not_redact = [
+        "secret: false",             # below the 8-char floor — a boolean flag, not a credential
+        "token: enabled",            # ditto
+        "passwordless: irrelevant",  # "password" isn't immediately followed by [:=] here
+        "mypassword=1234567890",     # letter (not underscore/boundary) right before the keyword
+        "the security token rotation work is tracked separately",  # proximity, no assignment
+    ]
+    for line in must_not_redact:
+        red = R.redact(line)
+        if red != line:
+            failures.append(f"[generic-bounds] should NOT alter {line!r}, got {red!r}")
 
 
 def test_registry(failures):
@@ -188,6 +226,7 @@ def main() -> int:
     failures = []
     test_over_match_guard(failures)
     test_patterns(failures)
+    test_generic_keyword_assignment_bounds(failures)
     test_registry(failures)
     test_store_boundary(failures)
     test_redact_obj(failures)
