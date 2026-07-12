@@ -31,6 +31,9 @@ class GroundingPlan:
 
 def plan_grounding(repo_context: str, *, cap_tokens: int = DEFAULT_CAP_TOKENS,
                    route_margin: int = DEFAULT_ROUTE_MARGIN, upload_available: bool) -> GroundingPlan:
+    # cap_tokens records the server's hard cap (DEFAULT_CAP_TOKENS); the route decision keys off
+    # route_margin (the buffer below that cap), so cap_tokens is reserved here for the caller's own
+    # pre-flight/diagnostics, not consumed by the branch below. Kept in the signature deliberately.
     if estimate_tokens(repo_context) < route_margin:
         return GroundingPlan(mode="inline", reason="under route margin")
     if not upload_available:
@@ -41,4 +44,7 @@ def plan_grounding(repo_context: str, *, cap_tokens: int = DEFAULT_CAP_TOKENS,
 
 def plan_to_upload_args(plan: "GroundingPlan") -> dict:
     """Exact tokonomix_upload({files}) argument dict — the agent passes this through verbatim."""
+    # Rebuilt on purpose (not `{"files": plan.files}`): normalize each file to exactly the
+    # {content, verbatim} contract tokonomix_upload expects and hand the caller fresh dicts, so the
+    # plan's internal list can't be aliased or mutated through the returned args.
     return {"files": [{"content": f["content"], "verbatim": f["verbatim"]} for f in plan.files]}
