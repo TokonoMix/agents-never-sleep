@@ -1,0 +1,53 @@
+name: release
+
+# Publish agents-never-sleep to PyPI via Trusted Publishing (OIDC — no stored token).
+#
+# Trigger: pushing a version tag (v1.2.3). The built version comes from
+# agents_never_sleep/__init__.py (the single source of truth); the tag is only the
+# release signal — keep the tag and __version__ in agreement.
+#
+# The PyPI side is a pre-registered "pending publisher" bound to:
+#   owner=TokonoMix  repo=agents-never-sleep  workflow=release.yml  environment=pypi
+# so the `environment: pypi` and the workflow filename below must not be renamed
+# without updating the publisher on PyPI.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
