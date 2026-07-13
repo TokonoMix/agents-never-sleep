@@ -129,7 +129,12 @@ def build_grounding_prompt(*, ticket_title: str, ticket_body: str, candidate_rea
     """The grounded prompt. It asks the council to DISAMBIGUATE using cited evidence — explicitly
     NOT 'should I proceed?' (the most dangerous framing). A verdict with no cited evidence is
     treated as no-resolution by interpret_verdict, so the prompt tells the models to answer
-    'undetermined' rather than guess."""
+    'undetermined' rather than guess.
+
+    `repo_context` MUST be a short pointer/summary, never a raw repo blob: bulk grounding
+    content is routed AGENT-SIDE via consensus_context.plan_grounding (inline/upload/degrade) per
+    SKILL.md — this builder only inlines whatever string it is handed and applies no size guard, so
+    handing it bulk content would blind-inline an over-budget context."""
     readings = "\n".join(f"  - Reading {chr(65 + i)}: {r}"
                          for i, r in enumerate(candidate_readings))
     return (
@@ -158,7 +163,11 @@ def build_soundness_prompt(*, ticket_title: str, ticket_body: str, category: str
     False` + cited evidence ONLY when the context AFFIRMATIVELY establishes soundness; a concrete
     cited defect is reported `defect_found=True` (hard veto -> PARK), and an ungrounded 'looks fine'
     fails the shared evidence gate -> PARK. So the prompt tells the models to answer 'undetermined'
-    rather than guess."""
+    rather than guess.
+
+    `repo_context` MUST be a short pointer/summary, never a raw repo blob (same contract as
+    build_grounding_prompt): bulk grounding content is routed AGENT-SIDE via
+    consensus_context.plan_grounding per SKILL.md — this builder applies no size guard."""
     return (
         f"A ticket in the high-risk category '{category}' is about to be PARKED for human review. "
         "The requirement is NOT ambiguous — assume the author already decided this change is wanted. "
