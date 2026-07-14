@@ -966,6 +966,15 @@ def main() -> int:
     agent_env = resolve_preset_env(agent_env, full_config, rep)
     child_env = dict(os.environ)
     child_env.update(agent_env)
+    # Freeze the out-of-repo consent snapshot (Part B) into the agent-CLI env, parallel to
+    # CLAUDE_UNATTENDED. Done HERE — after the TOFU gate (937) proved the config trusted, and
+    # BEFORE any worktree reassignment (1034) / agent spawn — so consent is (a) keyed to the
+    # PRIMARY repo where the wizard captured it, (b) frozen before any agent-influenceable step,
+    # and (c) present for every spawn path (fg exec, fresh-session loop, watchdog, bare Popen).
+    # enforce.py reads consent ONLY from this env var; a child cannot rewrite its parent's env.
+    from . import consent_store
+    child_env["UE_CONSENT"] = json.dumps((consent_store.read(repo) or {}).get("actions") or {})
+    child_env["UE_CONSENT_AUDIT"] = consent_store.audit_path(repo)
     check_agent_binary(agent_argv, agent_env, child_env, cfg, rep)
     check_credentials(cfg, rep)
     check_git(repo, rep)

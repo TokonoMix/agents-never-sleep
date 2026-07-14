@@ -32,7 +32,7 @@ from .fsutil import ensure_private_dir
 from .orchestrator import BAD_STATES, Orchestrator, ProceedToken
 from .vcs import GitError
 from .decide import Action
-from .report import build_report
+from .report import build_report, frozen_consent_provenance
 from .state import (ContaminationScope, OutcomeState, TERMINAL_SKIP_ON_RESUME,
                     OutcomeStore, TicketOutcome)
 
@@ -726,12 +726,14 @@ class StepDriver:
             backup_refs = self.orch.git.list_backup_refs()
         except GitError:
             backup_refs = []
+        consent_manifest, consent_events = frozen_consent_provenance()
         report = build_report(
             outcomes, run_label=self.run_label,
             halted=(status == "HALTED"), halt_reason=reason,
             stopped_low_yield=(status == "LOW_YIELD"), notes=stop_notes,
             work_branch=(run_branch if done else None),
             backup_refs=backup_refs,
+            consent_manifest=consent_manifest, consent_events=consent_events,
         )
         # The terminal JSON is the agent-facing contract — it must reach the agent even when
         # the repo root is unwritable (read-only fs is the flagship HALT case, so the report

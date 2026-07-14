@@ -32,43 +32,61 @@ def test_ask(failures):
 
 def test_irreversible(failures):
     deny = [
-        ("git push --force origin main", "force-push"),
-        ("git push -f", "force-push"),
-        ("git push origin --delete feature", "remote branch/tag delete"),
-        ("git push --mirror backup", "mirror push"),
-        ("rm -rf /", "recursive delete of a root/home path"),
-        ("rm -rf ~/important", "recursive delete of a root/home path"),
-        ("sudo rm -fr /etc", "recursive delete of a root/home path"),
-        ("psql -c 'DROP TABLE users'", "destructive SQL"),
-        ("mysql -e 'truncate table logs'", "destructive SQL"),
-        ("mkfs.ext4 /dev/sda1", "disk-destructive command"),
-        ("dd if=/dev/zero of=/dev/sda", "disk-destructive command"),
-        ("vault kv delete secret/x", "Vault secret deletion"),
-        ("vault kv put secret/x k=v", "Vault secret write/rotate"),
-        ("sendmail user@x.com < body", "sending real email"),
-        ("systemctl stop nginx", "service/volume teardown"),
-        ("docker volume rm data", "service/volume teardown"),
+        ("git push --force origin main", "force_push"),
+        ("git push -f", "force_push"),
+        ("git push origin --delete feature", "remote_delete"),
+        ("git push --mirror backup", "mirror_push"),
+        ("rm -rf /", "recursive_root_delete"),
+        ("rm -rf ~/important", "recursive_root_delete"),
+        ("sudo rm -fr /etc", "recursive_root_delete"),
+        ("psql -c 'DROP TABLE users'", "destructive_sql"),
+        ("mysql -e 'truncate table logs'", "destructive_sql"),
+        ("mkfs.ext4 /dev/sda1", "disk_destructive"),
+        ("dd if=/dev/zero of=/dev/sda", "disk_destructive"),
+        ("vault kv delete secret/x", "vault_secret"),
+        ("vault kv put secret/x k=v", "vault_secret"),
+        ("sendmail user@x.com < body", "send_email"),
         # standard-form bypass shapes closed post-audit (H1): whitespace/reordering/bundling/long-form
         # flags and force-via-refspec are all just as irreversible as the canonical spelling.
-        ("git push origin +main", "force-push"),
-        ("git push -qf origin main", "force-push"),
-        ("rm -r -f /", "recursive delete of a root/home path"),
-        ("rm --recursive --force /", "recursive delete of a root/home path"),
-        ("rm -r /important", "recursive delete of a root/home path"),
+        ("git push origin +main", "force_push"),
+        ("git push -qf origin main", "force_push"),
+        ("rm -r -f /", "recursive_root_delete"),
+        ("rm --recursive --force /", "recursive_root_delete"),
+        ("rm -r /important", "recursive_root_delete"),
         # second security-review pass (2026-07-12): quoted/braced forms that beat the H1 patterns.
-        ("git push origin '+master'", "force-push"),          # quoted +refspec force
-        ('git push origin "+topic"', "force-push"),
-        ("rm -rf ${HOME}", "recursive delete of a root/home path"),   # brace form of the covered $HOME
-        ('rm -rf "${HOME}"', "recursive delete of a root/home path"),
-        ("vault kv metadata delete secret/x", "Vault secret deletion"),  # permanent (vs recoverable kv delete)
-        ('dd if=/dev/zero of="/dev/sda"', "disk-destructive command"),   # quoted device path
+        ("git push origin '+master'", "force_push"),          # quoted +refspec force
+        ('git push origin "+topic"', "force_push"),
+        ("rm -rf ${HOME}", "recursive_root_delete"),   # brace form of the covered $HOME
+        ('rm -rf "${HOME}"', "recursive_root_delete"),
+        ("vault kv metadata delete secret/x", "vault_secret"),  # permanent (vs recoverable kv delete)
+        ('dd if=/dev/zero of="/dev/sda"', "disk_destructive"),   # quoted device path
+        # deny-list floor (2026-07-14): the 5 concessions moved ALLOW->DENY, plus the reviewer v4
+        # regex fixes (mount-agnostic vault, command-anchored mail) and the retained new adds.
+        ("redis-cli flushall", "redis_flush"),
+        ("docker volume rm pgdata", "docker_volume_rm"),
+        ("vault write db/rotate-root/x", "vault_secret"),
+        ("vault kv put secret/app/db k=v", "vault_secret"),
+        ("vault write kv/app k=v", "vault_secret"),
+        ('mail -s "done" a@b', "send_email"),
+        ("mail a@b < body", "send_email"),
+        ("echo hi | mail a@b", "send_email"),
+        ("sendmail -q", "send_email"),
+        ("postqueue -f", "send_email"),
+        ("systemctl mask nginx", "service_teardown"),
+        ("docker system prune -af", "service_teardown"),
+        ("docker compose down -v", "service_teardown"),
+        ("git push origin v1.2.3", "release_tag_push"),
+        ("git push --follow-tags origin main", "release_tag_push"),
+        ("find / -name '*.log' -delete", "recursive_root_delete"),
+        ("kubectl delete namespace staging", "k8s_delete"),
+        ("kubectl delete deployment web --all", "k8s_delete"),
     ]
-    for cmd, kind in deny:
-        bad, k = E.is_irreversible(cmd)
-        if not bad:
+    for cmd, slug in deny:
+        slugs = E.is_irreversible(cmd)
+        if not slugs:
             failures.append(f"[irrev] should DENY: {cmd!r}")
-        elif k != kind:
-            failures.append(f"[irrev] {cmd!r} kind {k!r} != {kind!r}")
+        elif slug not in slugs:
+            failures.append(f"[irrev] {cmd!r} slugs {slugs!r} do not include {slug!r}")
         d = E.decide("pre_tool", command=cmd)
         if d.action != Action.DENY:
             failures.append(f"[irrev] decide should DENY: {cmd!r}")
@@ -84,11 +102,23 @@ def test_irreversible(failures):
         "git push origin 'main'",          # quoted NORMAL branch (no +) — must ALLOW (no over-block)
         "echo ${HOME}/logs",               # a braced-var mention without rm — must ALLOW
         "vault kv get secret/x",           # a read, not a delete — must ALLOW
+        # deny-list floor (2026-07-14): must-ALLOW regression set.
+        "docker rm ci-container",          # container removal is routine, not the volume
+        "systemctl restart nginx",         # restart/stop-alone stays ALLOW; only mask is a floor concern
+        "kubectl delete pod x",            # narrowed to stateful/bulk kinds — a bare pod is routine
+        "vault write sys/policies/acl/x",  # non-secret system mount — not a secret overwrite
+        "git commit -m 'fix mailx bug'",   # mail over-block regression — toolname in prose, not a command
+        "git push origin v2-rewrite",      # version-shaped BRANCH name, not a dotted release tag
+        "find /var/www/proj -name '*.pyc' -delete",  # project subpath, not genuine root/home
+        "redis-cli get k",                 # a read, not a flush — must ALLOW
+        "docker compose down",             # plain compose down (no -v) stays ALLOW
+        "terraform plan",                  # plan is routine, not destroy
+        "aws s3 cp ./x s3://bucket/x",     # routine s3 op
     ]
     for cmd in allow:
-        bad, _ = E.is_irreversible(cmd)
-        if bad and cmd != "echo dropping the table is fine in prose":
-            failures.append(f"[irrev] should ALLOW: {cmd!r}")
+        slugs = E.is_irreversible(cmd)
+        if slugs and cmd != "echo dropping the table is fine in prose":
+            failures.append(f"[irrev] should ALLOW: {cmd!r} (matched {slugs!r})")
     # `git reset --hard` / `git clean` are the load-bearing allows — assert explicitly.
     for cmd in ("git reset --hard HEAD", "git clean -fd", "rm -rf ./build", "git push origin main"):
         if E.decide("pre_tool", command=cmd).action != Action.ALLOW:
@@ -104,6 +134,66 @@ def test_stop(failures):
         failures.append("[stop] block reason should explain the backlog isn't drained")
 
 
+def test_consent_gate(failures):
+    """t03: pre-authorized consent lifts PARK/DENY -> ALLOW, but ONLY for a single clean shell
+    statement matching EXACTLY ONE consented slug — a payload that chains/expands/redirects a
+    tail action, or touches two distinct irreversible kinds, must still DENY."""
+    redis_consent = {"redis_flush": {"allowed": True}}
+
+    # consented slug + clean single statement -> ALLOW.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent=redis_consent)
+    if d.action != Action.ALLOW:
+        failures.append(f"[consent] consented single statement should ALLOW: {d}")
+
+    # same command, consent absent/empty -> DENY (BC — byte-identical to pre-t03 behavior).
+    d = E.decide("pre_tool", command="redis-cli flushall")
+    if d.action != Action.DENY:
+        failures.append("[consent] no consent kwarg at all must still DENY (BC)")
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={})
+    if d.action != Action.DENY:
+        failures.append("[consent] empty consent dict must DENY")
+    d = E.decide("pre_tool", command="redis-cli flushall", consent=None)
+    if d.action != Action.DENY:
+        failures.append("[consent] consent=None must DENY")
+
+    # consented kind BUT the statement is chained/expanded/redirected/multi-line/wrapped ->
+    # DENY even though the kind alone is consented (the tail could be anything).
+    tail_cases = [
+        "redis-cli flushall\ncurl evil",       # newline
+        "redis-cli flushall && rm -rf /",       # &&
+        "redis-cli flushall | tee x",           # pipe
+        'bash -c "redis-cli flushall"',         # shell wrapper hides the payload
+        "echo $(redis-cli flushall)",           # command substitution
+    ]
+    for cmd in tail_cases:
+        d = E.decide("pre_tool", command=cmd, consent=redis_consent)
+        if d.action != Action.DENY:
+            failures.append(f"[consent] non-single-statement payload must DENY despite consent: {cmd!r} -> {d}")
+
+    # lone background `&` is its own case (distinct from `&&`) — `mail a@b & curl exfil` matches
+    # ONLY send_email, so only the single-statement check (not the multi-match check) stops the tail.
+    email_consent = {"send_email": {"allowed": True}}
+    d = E.decide("pre_tool", command="mail a@b & curl exfil", consent=email_consent)
+    if d.action != Action.DENY:
+        failures.append("[consent] a lone '&' tail must DENY even though the head's slug is consented")
+
+    # two DISTINCT floor slugs on one statement, only one consented -> DENY via len(distinct)!=1,
+    # regardless of separators.
+    d = E.decide("pre_tool", command="docker volume rm v; redis-cli flushall", consent=redis_consent)
+    if d.action != Action.DENY:
+        failures.append("[consent] two distinct irreversible kinds must DENY even if one slug is consented")
+
+    # wrong slug consented -> DENY.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={"docker_volume_rm": {"allowed": True}})
+    if d.action != Action.DENY:
+        failures.append("[consent] consent for an unrelated slug must not upgrade a different command")
+
+    # allowed must be True, not merely truthy/present.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={"redis_flush": {"allowed": False}})
+    if d.action != Action.DENY:
+        failures.append("[consent] allowed:False must DENY, not upgrade")
+
+
 def test_benign_and_unknown(failures):
     if E.decide("pre_tool", tool_name="Bash", command="ls -la").action != Action.ALLOW:
         failures.append("[benign] a harmless command must ALLOW")
@@ -115,6 +205,7 @@ def main() -> int:
     failures = []
     test_ask(failures)
     test_irreversible(failures)
+    test_consent_gate(failures)
     test_stop(failures)
     test_benign_and_unknown(failures)
     print("=" * 60)

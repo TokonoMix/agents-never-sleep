@@ -34,7 +34,7 @@ from .heartbeat import Heartbeat
 from .ledger import AttemptLedger
 from .orchestrator import Orchestrator
 from .preflight import run_preflight, write_profile
-from .report import build_report
+from .report import build_report, frozen_consent_provenance
 from .state import OutcomeStore
 from .tickets import load_tickets
 def _resolve_report_path(repo: str, config: dict, args_report: str) -> str:
@@ -581,8 +581,10 @@ def cmd_report(args) -> int:
         backup_refs = Git(ctx.repo).list_backup_refs()
     except GitError:
         backup_refs = []
+    consent_manifest, consent_events = frozen_consent_provenance()
     report = build_report(ctx.store.all(), run_label="unattended run",
-                          backup_refs=backup_refs, **_agent_hint_kwargs(ctx))
+                          backup_refs=backup_refs, consent_manifest=consent_manifest,
+                          consent_events=consent_events, **_agent_hint_kwargs(ctx))
     with open(ctx.report_path, "w", encoding="utf-8") as fh:
         fh.write(report)
     out = {"status": "REPORT_WRITTEN", "report_path": ctx.report_path}
