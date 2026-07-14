@@ -45,6 +45,28 @@ def test_dispatch_routes_install_hooks():
     assert rc == 0 and seen.get("install-hooks") == ["--yes"], seen
 
 
+def test_select_harness_single_and_none():
+    from agents_never_sleep import init_cmd
+    assert init_cmd.select_harness(["gemini"], assume_yes=True, out=lambda *a, **k: None) == "gemini"
+    assert init_cmd.select_harness([], assume_yes=True, out=lambda *a, **k: None) is None
+
+
+def test_select_harness_many_yes_prefers_claude():
+    from agents_never_sleep import init_cmd
+    got = init_cmd.select_harness(["gemini", "claude"], assume_yes=True, out=lambda *a, **k: None)
+    assert got == "claude", got
+
+
+def test_maturity_lines_flags_unverified():
+    # Assert on the EXACT suffix, not a substring both branches satisfy ("NOT live-verified"
+    # contains "live-verified"). Pass the agent-CLI name — the capabilities key.
+    from agents_never_sleep import init_cmd
+    claude = " ".join(init_cmd.maturity_lines("claude")).lower()
+    gemini = " ".join(init_cmd.maturity_lines("gemini")).lower()
+    assert "(live-verified)" in claude and "not live-verified" not in claude
+    assert "not live-verified" in gemini  # honest caveat present for the unproven adapter
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
