@@ -67,6 +67,16 @@ def test_maturity_lines_flags_unverified():
     assert "not live-verified" in gemini  # honest caveat present for the unproven adapter
 
 
+def test_detect_gates_go_and_rust():
+    from agents_never_sleep import preflight
+    go = tempfile.mkdtemp(); open(os.path.join(go, "go.mod"), "w").write("module x\n")
+    rs = tempfile.mkdtemp(); open(os.path.join(rs, "Cargo.toml"), "w").write("[package]\n")
+    go_gates = dict(preflight._detect_gates(go))
+    rs_gates = dict(preflight._detect_gates(rs))
+    assert go_gates.get("go-test") == ["go", "test", "./..."], go_gates
+    assert rs_gates.get("cargo-test") == ["cargo", "test"], rs_gates
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
