@@ -68,8 +68,40 @@ def _is_git_repo(repo: str) -> bool:
         return False
 
 
-def write_demo_tickets(repo: str, cfg: dict) -> None:
-    pass  # implemented in Task 4
+_DEMO_TICKETS = [
+    ("01-example-add-readme-badge.md",
+     "title: Example — add a build badge to the README\n"
+     "expected_outcome: README shows a passing-tests badge\n"
+     "blast_radius: docs-only\n",
+     "This is an EXAMPLE ticket showing the shape ANS expects. It is NOT run: examples live in\n"
+     "`.claude/ans-examples/` which the backlog scanner never reads. Copy a ticket you actually\n"
+     "want into `<repo>/tickets/` (the default backlog source) to have ANS work it.\n"),
+    ("02-example-fix-flaky-test.md",
+     "title: Example — stabilise a flaky test\n"
+     "expected_outcome: the named test passes 20x in a row\n"
+     "blast_radius: test-only\n",
+     "Example only. Describe the failure, the file, and a concrete done-condition ANS can verify.\n"),
+    ("03-example-small-refactor.md",
+     "title: Example — extract a helper for X\n"
+     "expected_outcome: behaviour identical; the new helper has a unit test\n"
+     "blast_radius: single-module\n",
+     "Example only. Keep tickets small and independently verifiable — one deliverable each.\n"),
+]
+
+
+def write_demo_tickets(repo: str, cfg: dict) -> list[str]:
+    # ALWAYS <repo>/.claude/ans-examples — NEVER <repo>/tickets (the backlog source), so an example
+    # can never be picked up by load_tickets and run. (Consensus round 2 confirmation.)
+    out_dir = os.path.join(repo, ".claude", "ans-examples")
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for name, front, body in _DEMO_TICKETS:
+        path = os.path.join(out_dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"---\n{front}---\n\n{body}")
+        paths.append(path)
+    print(f"Wrote {len(paths)} inert example tickets to {out_dir} (reference only — never run).")
+    return paths
 
 
 def print_enforcement_handoff(harness, repo: str) -> None:

@@ -212,6 +212,24 @@ def test_yes_with_trust_records_trust():
         os.environ["HOME"] = old or ""
 
 
+def test_demo_tickets_are_inert():
+    from agents_never_sleep import init_cmd, config, tickets
+    repo = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    init_cmd.run_init(["--repo", repo, "--yes"])
+    examples = os.path.join(repo, ".claude", "ans-examples")
+    written = [f for f in os.listdir(examples) if f.endswith(".md")]
+    assert 2 <= len(written) <= 3, written
+    # Prove non-discovery against the REAL default source <repo>/tickets (run.py:631), with a genuine
+    # ticket present — load_tickets must return the real one and NEVER an example.
+    tickets_dir = os.path.join(repo, "tickets")
+    os.makedirs(tickets_dir, exist_ok=True)
+    open(os.path.join(tickets_dir, "real.md"), "w").write("---\ntitle: real\n---\nbody\n")
+    loaded = tickets.load_tickets(tickets_dir)
+    titles = [t.title for t in loaded]
+    assert titles == ["real"], titles  # exactly the real ticket; zero examples leaked in
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
