@@ -99,6 +99,9 @@ INSTANT_FAIL = "#!/bin/sh\nexit 7\n"
 # Dumps CLAUDE_UNATTENDED into a file beside itself so a detached test can inspect what the spawned
 # agent actually saw, then exits fast (no lingering process to wait out).
 ENV_DUMPER = '#!/bin/sh\necho "${CLAUDE_UNATTENDED:-UNSET}" > "$(dirname "$0")/env-dump.txt"\nexit 0\n'
+# Same idea for UE_CONSENT (t03: the frozen out-of-repo consent snapshot).
+CONSENT_ENV_DUMPER = ('#!/bin/sh\necho "${UE_CONSENT:-UNSET}" > "$(dirname "$0")/consent-dump.txt"\n'
+                      'exit 0\n')
 
 
 def test_untrusted_config_headless_is_nogo(failures):
@@ -635,6 +638,52 @@ def test_trusted_target_user_requires_trust(failures):
         failures.append(f"[root-guard] config change should invalidate trust, got {changed!r}")
 
 
+def _read_consent_dump(repo: str, timeout: int = 15) -> str | None:
+    path = os.path.join(repo, "consent-dump.txt")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path):
+            with open(path) as fh:
+                return fh.read().strip()
+        time.sleep(0.2)
+    return None
+
+
+def test_consent_frozen_into_child_env(failures):
+    # t03: UE_CONSENT must carry the out-of-repo consent snapshot (keyed to the PRIMARY repo,
+    # via consent_store.read) into the agent-CLI env, parallel to CLAUDE_UNATTENDED (M1) — present
+    # on the plain detached path even when no consent was ever recorded (empty "{}", never unset).
+    import unittest.mock
+
+    from agents_never_sleep import consent_store
+
+    consent_dir = tempfile.mkdtemp(prefix="ue-launcher-consent-")
+
+    repo = _trusted_repo(CONSENT_ENV_DUMPER)
+    with unittest.mock.patch.dict(os.environ, {"ANS_CONSENT_STORE": consent_dir, "ANS_TEST_MODE": "1"}):
+        consent_store.write(repo, actions={"redis_flush": {"allowed": True}}, by="tester")
+    res = _run(repo, "--no-watchdog", "go", env_extra={"ANS_CONSENT_STORE": consent_dir})
+    if res.returncode != 0:
+        failures.append(f"[consent-freeze] expected 0, got {res.returncode}: {res.stdout}{res.stderr}")
+    seen = _read_consent_dump(repo)
+    try:
+        got = json.loads(seen) if seen and seen != "UNSET" else None
+    except ValueError:
+        got = None
+    if got != {"redis_flush": {"allowed": True}}:
+        failures.append(f"[consent-freeze] UE_CONSENT should carry the recorded actions map, got {seen!r}")
+
+    # A repo with no consent ever recorded still gets UE_CONSENT set — to an EMPTY map, never unset —
+    # so enforce.py's env-only read never falls through to some other (agent-writable) source.
+    repo2 = _trusted_repo(CONSENT_ENV_DUMPER)
+    res2 = _run(repo2, "--no-watchdog", "go", env_extra={"ANS_CONSENT_STORE": consent_dir})
+    if res2.returncode != 0:
+        failures.append(f"[consent-freeze-empty] expected 0, got {res2.returncode}: {res2.stdout}{res2.stderr}")
+    seen2 = _read_consent_dump(repo2)
+    if seen2 != "{}":
+        failures.append(f"[consent-freeze-empty] UE_CONSENT should be '{{}}' with no consent recorded, got {seen2!r}")
+
+
 def test_claude_unattended_forced_on_all_detached_paths(failures):
     # M1 (post-audit): CLAUDE_UNATTENDED=1 used to reach the spawned agent only via watchdog.py's
     # own child env, so --no-watchdog (and fresh-session mode, which never touches watchdog.py at
@@ -701,6 +750,7 @@ def main() -> int:
     test_bg_start_reports_log_and_pid(failures)
     test_run_log_open_rejects_symlink(failures)
     test_claude_unattended_forced_on_all_detached_paths(failures)
+    test_consent_frozen_into_child_env(failures)
     test_trusted_target_user_requires_trust(failures)
     print("=" * 60)
     if failures:

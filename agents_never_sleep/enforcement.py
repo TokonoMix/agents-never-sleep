@@ -166,10 +166,48 @@ def is_irreversible(command):
     return [slug for _, slug in _irreversible_matches(command)]
 
 
-def decide(event: str, *, tool_name=None, command=None, sentinel_present: bool = False) -> Decision:
+# t03 consent gate: separator/wrapper shapes that mean a command is NOT a single clean shell
+# statement, so a consented slug's tail can hide an uncontested (unconsented) second command.
+# Deliberately over-inclusive (same "when in doubt, DENY" posture as _IRREVERSIBLE) — a lone `&`
+# is caught by the same `[;&|]` alternative that also catches `&&`/`||`'s constituent chars.
+_STATEMENT_BREAK_RE = re.compile(r"&&|\|\||[;&|]|\$\(|`|<\(|<<|>")
+# Interpreter `-c`/`-e`-style wrappers hide the real payload from the pattern matcher entirely
+# (e.g. `bash -c "redis-cli flushall"` — the outer command is just `bash`). Never upgradeable.
+_SHELL_WRAPPER_RE = re.compile(
+    r"\b(?:sh|bash|dash|ksh|zsh|python[0-9.]*|perl|ruby|node)\s+(?:-\S+\s+)*-c\b", re.I)
+
+
+def _is_single_clean_statement(command) -> bool:
+    """True only for a command that is exactly ONE shell statement with no separator, no
+    substitution/redirection, and no interpreter wrapper hiding the payload — the shape a
+    consent upgrade is allowed to ride. A command fails this if ANY line (split on \\n) — or the
+    whole string — contains \\r, a statement separator (;, &, &&, |, ||), command/process
+    substitution ($(...), `...`, <(...)), a heredoc (<<), an output redirect (>, >>), or a shell
+    wrapper (sh -c / bash -c / python -c / …)."""
+    if not command or "\r" in command:
+        return False
+    lines = [ln for ln in command.split("\n") if ln.strip()]
+    if len(lines) != 1:
+        return False
+    line = lines[0]
+    if _STATEMENT_BREAK_RE.search(line):
+        return False
+    if _SHELL_WRAPPER_RE.search(line):
+        return False
+    return True
+
+
+def decide(event: str, *, tool_name=None, command=None, sentinel_present: bool = False,
+           consent=None) -> Decision:
     """The whole contract in one place.
       event="pre_tool" -> DENY an ask-tool or an irreversible command, else ALLOW.
       event="stop"     -> BLOCK while the run-incomplete sentinel exists, else ALLOW.
+
+    `consent` (t03): a pre-authorized-action map ({slug: {"allowed": True}, ...}), read by the
+    caller ONLY from the frozen UE_CONSENT env var (see enforce.py._consent) — never from
+    anything repo-local. Defaults to None so every pre-t03 caller is unaffected (BC): with no
+    consent, or with consent that doesn't single-slug-and-clean-statement-match, behavior is
+    byte-identical to the plain deny-list floor.
     """
     if event == "stop":
         if sentinel_present:
@@ -179,9 +217,27 @@ def decide(event: str, *, tool_name=None, command=None, sentinel_present: bool =
         if is_ask_tool(tool_name):
             return Decision(Action.DENY, ASK_DENY_REASON, "ask")
         matches = _irreversible_matches(command)
-        if matches:
-            kinds = [kind for kind, _ in matches]
-            slugs = [slug for _, slug in matches]
-            return Decision(Action.DENY, irreversible_reason(", ".join(kinds)), ",".join(slugs))
-        return Decision(Action.ALLOW)
+        if not matches:
+            return Decision(Action.ALLOW)
+        kinds = [kind for kind, _ in matches]
+        slugs = [slug for _, slug in matches]
+        deny = Decision(Action.DENY, irreversible_reason(", ".join(kinds)), ",".join(slugs))
+        if not consent:
+            return deny
+        distinct = set(slugs)
+        if len(distinct) != 1:
+            # A command touching two irreversible kinds can never ride a single consent, no
+            # matter how the statement is shaped — this is the primary defense, ahead of the
+            # single-statement check, so it backstops any gap in the separator/wrapper set.
+            return deny
+        slug = next(iter(distinct))
+        if consent.get(slug, {}).get("allowed") is not True:
+            return deny
+        if not _is_single_clean_statement(command):
+            return deny
+        return Decision(
+            Action.ALLOW,
+            f"agents-never-sleep: consent-upgraded ({slug}) — a single clean shell statement "
+            "matched exactly one pre-authorized action class.",
+            f"consent:{slug}")
     return Decision(Action.ALLOW)

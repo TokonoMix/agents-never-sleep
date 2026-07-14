@@ -17,17 +17,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_ROOT = os.path.dirname(HERE)
 
 
-def _run(platform, event, payload, *, unattended=True, sentinel_path=None):
+def _run(platform, event, payload, *, unattended=True, sentinel_path=None, extra_env=None, cwd=None):
     env = dict(os.environ)
     env.pop("CLAUDE_UNATTENDED", None)
     env.pop("UE_UNATTENDED", None)
+    env.pop("UE_CONSENT", None)
     if unattended:
         env["UE_UNATTENDED"] = "1"
     if sentinel_path:
         env["UE_RUN_INCOMPLETE"] = sentinel_path
+    if extra_env:
+        env.update(extra_env)
     p = subprocess.run([sys.executable, "-m", "agents_never_sleep.enforce", platform, event],
                        input=json.dumps(payload), text=True, capture_output=True,
-                       cwd=SKILL_ROOT, env=env)
+                       cwd=cwd or SKILL_ROOT, env=env)
     return p
 
 
@@ -112,6 +115,59 @@ def _check_hook_contract_coverage(failures):
     for plat in capabilities.SUPPORTED:  # ALL platforms (incl. in-process/wrapper) need a contract
         if not capabilities.hook_contract(plat) or "contract" not in capabilities.hook_contract(plat):
             failures.append(f"[matrix] {plat} has no recorded hook-contract version")
+
+
+def test_consent_env_gate(failures):
+    """t03 end-to-end: UE_CONSENT (frozen by the launcher, read ONLY from this env var) lifts a
+    single consented, single-clean-statement irreversible command to ALLOW; absent/oversized/
+    malformed UE_CONSENT all DENY (fail-safe — an unreadable consent is NO consent)."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": "redis-cli flushall"}}
+    consent_json = json.dumps({"redis_flush": {"allowed": True}})
+
+    p = _run("claude", "pre_tool", payload, extra_env={"UE_CONSENT": consent_json})
+    if _denied("claude", p):
+        failures.append(f"[consent-env] consented redis_flush should ALLOW end-to-end (out={p.stdout!r})")
+
+    p = _run("claude", "pre_tool", payload)  # UE_CONSENT unset
+    if not _denied("claude", p):
+        failures.append("[consent-env] without UE_CONSENT the same command must DENY")
+
+    oversized = json.dumps({"redis_flush": {"allowed": True}, "pad": "x" * 70000})
+    p = _run("claude", "pre_tool", payload, extra_env={"UE_CONSENT": oversized})
+    if not _denied("claude", p):
+        failures.append("[consent-env] oversized (>64KB) UE_CONSENT must DENY (treated as no consent)")
+
+    p = _run("claude", "pre_tool", payload, extra_env={"UE_CONSENT": "{bad"})
+    if not _denied("claude", p):
+        failures.append("[consent-env] malformed UE_CONSENT JSON must DENY")
+
+    p = _run("claude", "pre_tool", payload, extra_env={"UE_CONSENT": "[1, 2]"})
+    if not _denied("claude", p):
+        failures.append("[consent-env] non-dict UE_CONSENT (JSON array) must DENY")
+
+
+def test_consent_ignores_repo_file(failures):
+    """Self-authorization regression: a repo-local file shaped like consent must have ZERO
+    effect — only the frozen UE_CONSENT env var counts. An unattended agent CAN write repo
+    files, so if a repo file granted consent the agent could authorize itself mid-run."""
+    work = tempfile.mkdtemp(prefix="ue-enf-selfauth-")
+    unattended_dir = os.path.join(work, ".unattended")
+    os.makedirs(unattended_dir, exist_ok=True)
+    with open(os.path.join(unattended_dir, "consent.json"), "w", encoding="utf-8") as fh:
+        json.dump({"actions": {"redis_flush": {"allowed": True}}}, fh)
+
+    payload = {"tool_name": "Bash", "tool_input": {"command": "redis-cli flushall"}}
+    env = dict(os.environ)
+    env["UE_UNATTENDED"] = "1"
+    env.pop("CLAUDE_UNATTENDED", None)
+    env.pop("UE_CONSENT", None)
+    env["PYTHONPATH"] = SKILL_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    p = subprocess.run([sys.executable, "-m", "agents_never_sleep.enforce", "claude", "pre_tool"],
+                       input=json.dumps(payload), text=True, capture_output=True,
+                       cwd=work, env=env)
+    if not _denied("claude", p):
+        failures.append("[consent-env] a repo-local consent-shaped file must have zero effect "
+                         f"(only UE_CONSENT counts): out={p.stdout!r}")
 
 
 def main() -> int:
@@ -202,6 +258,9 @@ def main() -> int:
                        input=json.dumps(BENIGN["windsurf"]), text=True, capture_output=True, env=env)
     if p.returncode != 0:
         failures.append(f"[launcher] windsurf benign should exit 0 via enforce.sh (rc={p.returncode})")
+
+    test_consent_env_gate(failures)
+    test_consent_ignores_repo_file(failures)
 
     print("=" * 60)
     if failures:

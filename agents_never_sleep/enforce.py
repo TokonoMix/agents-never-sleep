@@ -27,10 +27,32 @@ from .fsutil import ensure_private_dir
 
 _UNATTENDED_ENV = ("UE_UNATTENDED", "CLAUDE_UNATTENDED")
 _STOP_LOOP_CAP = 5  # anti-infinite-loop: stop blocking after this many auto-continues
+_CONSENT_MAX_BYTES = 65536  # bound the frozen consent payload; oversize -> treat as no consent
 
 
 def _unattended() -> bool:
     return any(os.environ.get(k) == "1" for k in _UNATTENDED_ENV)
+
+
+def _consent() -> dict:
+    """Pre-authorized action classes, read ONLY from the frozen UE_CONSENT env var (never a repo
+    file — a repo file is agent-writable, which would be self-authorization). Missing / oversized
+    / malformed / non-dict -> {} (deny/park). The fail-open-on-malformed-payload philosophy that
+    applies to the HOOK stdin (_read_stdin above) must NOT extend to consent: an unreadable
+    consent is NO consent.
+
+    Threat boundary: this process's parent is always the trusted agent-CLI launcher (launcher.py
+    freezes UE_CONSENT right after the TOFU trust gate) — there is no standalone/agent-launchable
+    invocation path that would hand this env var an untrusted value from an untrusted parent.
+    """
+    raw = os.environ.get("UE_CONSENT")
+    if not raw or len(raw.encode("utf-8", "surrogateescape")) > _CONSENT_MAX_BYTES:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _read_stdin() -> dict:
@@ -178,7 +200,7 @@ def main(argv=None) -> int:
 
     if event == "pre_tool":
         tool_name, command = _normalize(platform, payload)
-        d = decide("pre_tool", tool_name=tool_name, command=command)
+        d = decide("pre_tool", tool_name=tool_name, command=command, consent=_consent())
         return _emit_deny(platform, d.reason) if d.action == Action.DENY else 0
 
     return 0

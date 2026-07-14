@@ -134,6 +134,66 @@ def test_stop(failures):
         failures.append("[stop] block reason should explain the backlog isn't drained")
 
 
+def test_consent_gate(failures):
+    """t03: pre-authorized consent lifts PARK/DENY -> ALLOW, but ONLY for a single clean shell
+    statement matching EXACTLY ONE consented slug — a payload that chains/expands/redirects a
+    tail action, or touches two distinct irreversible kinds, must still DENY."""
+    redis_consent = {"redis_flush": {"allowed": True}}
+
+    # consented slug + clean single statement -> ALLOW.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent=redis_consent)
+    if d.action != Action.ALLOW:
+        failures.append(f"[consent] consented single statement should ALLOW: {d}")
+
+    # same command, consent absent/empty -> DENY (BC — byte-identical to pre-t03 behavior).
+    d = E.decide("pre_tool", command="redis-cli flushall")
+    if d.action != Action.DENY:
+        failures.append("[consent] no consent kwarg at all must still DENY (BC)")
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={})
+    if d.action != Action.DENY:
+        failures.append("[consent] empty consent dict must DENY")
+    d = E.decide("pre_tool", command="redis-cli flushall", consent=None)
+    if d.action != Action.DENY:
+        failures.append("[consent] consent=None must DENY")
+
+    # consented kind BUT the statement is chained/expanded/redirected/multi-line/wrapped ->
+    # DENY even though the kind alone is consented (the tail could be anything).
+    tail_cases = [
+        "redis-cli flushall\ncurl evil",       # newline
+        "redis-cli flushall && rm -rf /",       # &&
+        "redis-cli flushall | tee x",           # pipe
+        'bash -c "redis-cli flushall"',         # shell wrapper hides the payload
+        "echo $(redis-cli flushall)",           # command substitution
+    ]
+    for cmd in tail_cases:
+        d = E.decide("pre_tool", command=cmd, consent=redis_consent)
+        if d.action != Action.DENY:
+            failures.append(f"[consent] non-single-statement payload must DENY despite consent: {cmd!r} -> {d}")
+
+    # lone background `&` is its own case (distinct from `&&`) — `mail a@b & curl exfil` matches
+    # ONLY send_email, so only the single-statement check (not the multi-match check) stops the tail.
+    email_consent = {"send_email": {"allowed": True}}
+    d = E.decide("pre_tool", command="mail a@b & curl exfil", consent=email_consent)
+    if d.action != Action.DENY:
+        failures.append("[consent] a lone '&' tail must DENY even though the head's slug is consented")
+
+    # two DISTINCT floor slugs on one statement, only one consented -> DENY via len(distinct)!=1,
+    # regardless of separators.
+    d = E.decide("pre_tool", command="docker volume rm v; redis-cli flushall", consent=redis_consent)
+    if d.action != Action.DENY:
+        failures.append("[consent] two distinct irreversible kinds must DENY even if one slug is consented")
+
+    # wrong slug consented -> DENY.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={"docker_volume_rm": {"allowed": True}})
+    if d.action != Action.DENY:
+        failures.append("[consent] consent for an unrelated slug must not upgrade a different command")
+
+    # allowed must be True, not merely truthy/present.
+    d = E.decide("pre_tool", command="redis-cli flushall", consent={"redis_flush": {"allowed": False}})
+    if d.action != Action.DENY:
+        failures.append("[consent] allowed:False must DENY, not upgrade")
+
+
 def test_benign_and_unknown(failures):
     if E.decide("pre_tool", tool_name="Bash", command="ls -la").action != Action.ALLOW:
         failures.append("[benign] a harmless command must ALLOW")
@@ -145,6 +205,7 @@ def main() -> int:
     failures = []
     test_ask(failures)
     test_irreversible(failures)
+    test_consent_gate(failures)
     test_stop(failures)
     test_benign_and_unknown(failures)
     print("=" * 60)
