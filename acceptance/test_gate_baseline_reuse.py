@@ -193,6 +193,54 @@ def main() -> int:
     if cache_after != cache_before:
         failures.append(f"[g] a non-PASS complete rewrote the cache: {cache_before} -> {cache_after}")
 
+    # --- h. gitignored execution-relevant file -> tree_id() key changes -> cache-miss (t06) --
+    # git status --porcelain (no --ignored) omits ignored files, so a clean plain-porcelain
+    # tree can still have an agent-added gitignored sitecustomize.py/.env/conftest.py that
+    # silently changes runtime/test behaviour -> a stale green would be served (false-green on
+    # the ONLY hard gate). tree_id() must fold execution-relevant IGNORED files into its key so
+    # such an add forces a miss. Controls prove the two boundaries: an UNTRACKED file is already
+    # a miss (plain porcelain shows ??), and a BENIGN ignored file (debug.log, or an ignored
+    # DIRECTORY like .unattended/) must NOT change the key (else the cache never hits in practice).
+    work = tempfile.mkdtemp(prefix="ue-gatecache-ignored-")
+    repo = _init_repo(work)
+    with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8") as fh:
+        fh.write("sitecustomize.py\n.env\n*.log\nbuildcache/\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "gitignore"], cwd=repo, check=True)
+    key_clean = gate_cache.tree_id(repo)
+    if key_clean is None:
+        failures.append("[h] a clean repo (only a committed .gitignore) must yield a tree_id")
+    # h1: a benign ignored file and an ignored directory must NOT move the key (cache still works)
+    with open(os.path.join(repo, "debug.log"), "w", encoding="utf-8") as fh:
+        fh.write("noise\n")
+    os.makedirs(os.path.join(repo, "buildcache"), exist_ok=True)
+    with open(os.path.join(repo, "buildcache", "out.o"), "w", encoding="utf-8") as fh:
+        fh.write("artifact\n")
+    if gate_cache.tree_id(repo) != key_clean:
+        failures.append("[h1] a benign ignored file/dir must NOT change the cache key "
+                        "(would disable the cache for every real run)")
+    # h2: a gitignored execution-relevant file MUST move the key -> the next baseline misses
+    with open(os.path.join(repo, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+        fh.write("import os; os.environ['HACK'] = '1'\n")
+    key_hacked = gate_cache.tree_id(repo)
+    if key_hacked is None:
+        failures.append("[h2] a gitignored sitecustomize.py must still be cacheable (a NEW key), "
+                        "not disable the cache")
+    if key_hacked == key_clean:
+        failures.append("[h2] a gitignored execution-relevant file did NOT change the cache key "
+                        "-> false-green hole on the only hard gate")
+    # h3: mutating that file's CONTENT must move the key again (content is in the digest)
+    with open(os.path.join(repo, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+        fh.write("import os; os.environ['HACK'] = '2'\n")
+    if gate_cache.tree_id(repo) == key_hacked:
+        failures.append("[h3] changing the ignored file's content did NOT change the key")
+    # h4 (control): an UNTRACKED (non-ignored) file is already a miss via plain porcelain
+    os.remove(os.path.join(repo, "sitecustomize.py"))
+    with open(os.path.join(repo, "newmod.py"), "w", encoding="utf-8") as fh:
+        fh.write("x = 1\n")
+    if gate_cache.tree_id(repo) is not None:
+        failures.append("[h4] an untracked file must yield tree_id()=None (already caught)")
+
     if failures:
         print("RESULT: ❌ RED — gate-baseline-reuse cache not proven")
         for f in failures:
