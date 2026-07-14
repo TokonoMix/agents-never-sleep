@@ -10,6 +10,61 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-14
+
+The unattended safety model: a conservative deny-list **floor** plus a run-setup **consent
+manifest** that lets a human pre-authorize specific classes for a run. Two controls, two jobs —
+the floor blocks the known-irreversible commands by default (a backstop against an honest mistake,
+NOT a boundary against evasion — it does not inspect script contents), and consent is the
+operator's explicit, run-wide, all-targets escape hatch. See `SECURITY.md`.
+
+### Changed — enforcement behaviour (deny-list floor)
+This narrows/removes some live blocks AND adds new ones, so it is a behaviour change to shipped
+enforcement, not additive hardening. `enforcement.decide()` gained an optional `consent=` kwarg;
+the no-consent path is byte-identical to 1.4.0 (backward compatible).
+
+- **Now DENY/PARK (new):** `redis-cli flush(all|db)` (Redis is as often a session/queue/lock store
+  as a cache), `docker volume rm` (a named volume *is* the data), secret-path `vault kv put` /
+  `vault write <mount>/` (an overwrite; on KV v1 there is no version history), release-tag pushes
+  (`git push … vX.Y.Z / --tags / --follow-tags`), `find … -delete/-exec rm` on root/home,
+  `kubectl delete` of stateful/bulk kinds, publishing (`npm/pnpm/yarn/poetry/cargo/gem/flit
+  publish`, `gh release create`), infra teardown (`terraform destroy`, `aws s3 rb`, `aws s3 rm
+  --recursive`), `systemctl mask`, `crontab -r`, `docker system prune`, `docker compose down -v`,
+  power-state changes, recursive `chmod/chown` on root/home.
+- **⚠️ CONCESSION 4 — single-message + mass email now DENYs by default** (`sendmail`/`mailx`/`mail
+  -s`, `postqueue`/`postsuper`/`postfix flush|reload|stop`, `exim -M`, `sendmail -q`). Failure mode
+  it guards: "a test script mails 4,000 customers at 3am." **This can break an unattended run that
+  legitimately sends a notification.** The "notify me" need is served instead by the morning report
+  and, for a real unattended send, by pre-authorizing `send_email` in the consent manifest at setup.
+- **No longer blanket-DENY (removed over-blocks):** blunt `systemctl stop/disable` (replaced by
+  `systemctl mask` + prune/compose-down-v), `docker rm <container>` (only `docker volume rm` — the
+  data — is on the floor), bare `flushall/flushdb` outside `redis-cli`, `db.X.drop(` outside a
+  client context. Non-secret `vault write` (auth config, policies, leases) stays ALLOW.
+
+### Added — run-setup consent manifest (opt-in escape hatch)
+- **Interactive wizard "actions" section** pre-authorizes deny-list classes for a run. Consent is
+  stored OUT-OF-REPO (`~/.config/agents-never-sleep/consent/…`, TOFU-style) so the unattended agent
+  structurally cannot author its own consent, frozen at launch into the `UE_CONSENT` env var, and
+  upgrades PARK→ALLOW only for a **single clean shell statement** matching **exactly one** consented
+  class (chaining, substitution, redirection, newline, interpreter `-c` wrappers all void it).
+- **Honest limits (not oversold):** consent is granted per-class, once, at setup, for the WHOLE run
+  across EVERY reachable target — there is no per-invocation or per-target check. Pre-authorize a
+  high-blast class (`redis_flush`, `send_email`) only for runs scoped to non-critical environments.
+  Structured target-scoping (host/URL/recipient allowlists) is the deferred v2 feature.
+- **Consent audit + report provenance:** an out-of-repo append-only trail records every command
+  that ran under consent; the morning report lists what was pre-authorized and what rode it.
+
+### Fixed
+- **`gate_cache` gitignored-file false-green (t06):** `git status --porcelain` omits ignored files,
+  so an agent adding a gitignored `sitecustomize.py`/`.env`/`conftest.py`/`*.pth` kept the tree id
+  stable while runtime behaviour changed — a stale green baseline could be reused on the only hard
+  gate. The cache key now folds a content digest of execution-relevant ignored files (benign
+  ignored files like `.unattended/`, `__pycache__/`, build artifacts do not disable the cache).
+- **Never-stop counter reset is now regression-locked (t07):** the cross-platform stop-block cap
+  already reset on ticket progress (not only on a drained backlog) via `driver._bump_progress`; that
+  invariant was untested and is now covered, so a non-Claude run can't silently stop with a full
+  backlog if the reset ever regresses.
+
 ## [1.4.0] — 2026-07-12
 
 First release published to PyPI: `pip install agents-never-sleep` now resolves the package
