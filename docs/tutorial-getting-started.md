@@ -30,8 +30,8 @@ pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0
 #   pip install -e .
 ```
 
-> PyPI is **not** live yet, so `pip install agents-never-sleep` (bare) does not work today — use the
-> GitHub install above. See the [roadmap](roadmap.md).
+> The bare `pip install agents-never-sleep` works — live on PyPI since v1.4.0. The GitHub install above
+> is the alternative for pinning to a specific tag or hacking on an unreleased checkout.
 
 ## 2. Understand the contract (one minute, it's the whole point)
 

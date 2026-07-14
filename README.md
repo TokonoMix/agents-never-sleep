@@ -41,7 +41,7 @@ ANS names and proposes a category — *Autonomous Execution Governance* — the 
 between a model that can act and a developer who isn't watching. The category is one we propose here, not
 an externally settled standard: there is no outside spec and no second implementation yet.
 
-- **Version:** 1.4.0
+- **Version:** 1.5.0
 - **Install:** `pip install agents-never-sleep` (see [Installation](#8-installation)).
 - **Source:** [TokonoMix/agents-never-sleep](https://github.com/TokonoMix/agents-never-sleep) · MIT
 
@@ -518,7 +518,7 @@ pip install agents-never-sleep
 
 ```bash
 # Pin a specific tagged release straight from GitHub:
-pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.4.0
+pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.5.0
 
 # Or from a checkout (editable, to hack on it):
 git clone https://github.com/TokonoMix/agents-never-sleep
@@ -755,7 +755,9 @@ the DIY path stays fully functional without it.
 **What happens if it can't undo something?**
 It doesn't get there. Deny-hooks block irreversible/outward actions at the source (force-push, remote
 branch deletes, destructive SQL, secret deletion, disk wipes). If there's no reversibility safety net at
-all and none creatable, the run HALTs rather than proceed.
+all and none creatable, the run HALTs rather than proceed. This is a backstop, not a boundary (see
+`SECURITY.md`); an operator can pre-authorize specific classes for a run via the consent manifest at
+setup.
 
 **Can I run two at once on the same repo?**
 The launcher's atomic working-tree lock yields exactly one winner per working tree. For intentionally
@@ -778,8 +780,10 @@ ANS is a governance layer, not a correctness oracle. Concretely:
 - **A wrong PROCEED assumption is possible.** Blast-radius tiering reduces the odds, but a misjudged
   PROCEED can be wrong. **This is precisely why every PROCEED change is built to be reversible** —
   git-backed snapshot/revert and every assumption committed — while the genuinely irreversible
-  operations are blocked outright by deny-hooks (they HALT). So a wrong call during a run is a
-  five-minute revert afterwards, not a disaster.
+  operations are denied outright at the tool layer by the deny-list floor — a backstop against an
+  honest mistake, not a boundary against a determined evasion (see `SECURITY.md`); an operator can
+  pre-authorize specific classes via the run-setup consent manifest, otherwise the floor holds. So a
+  wrong call during a run is a five-minute revert afterwards, not a disaster.
 - **Cross-platform enforcement is live-verified only on Claude Code.** Everywhere else it is built to
   the platform's documented hook contract and hermetically tested, but not yet confirmed on the real
   tool.
@@ -795,6 +799,13 @@ ANS is a governance layer, not a security product. Here is what each protection 
   before they execute. On other platforms (built-to-contract, not yet live-verified on the real tool),
   the same decision core runs but whether the native hook fires is not confirmed. Any gap is reported
   as a loud BLIND SPOT, never a silent one.
+- **Deny-list floor vs. determined evasion:** the floor pattern-matches literal command shapes; it
+  does not inspect script contents, so a non-shell wrapper (a Python `subprocess` call, a
+  base64-decoded payload) never produces the matched substrings — the trusted-run threat model, a
+  backstop against an honest mistake, not a boundary against evasion. An operator can pre-authorize
+  specific floor classes for a run via the setup-time **consent manifest** (out-of-repo, TOFU-style,
+  frozen into `UE_CONSENT`, single-clean-statement match only) — see `SECURITY.md` for the full model
+  and its honest limits (per-class, once, whole-run, all-targets — no per-target scoping yet).
 - **Secret redaction:** scrubs credentials from all reports, logs, and Paperclip comments — by shape
   and by a registry of known values. It does not guarantee zero-leakage; it is a defence-in-depth
   layer.
@@ -882,7 +893,7 @@ The full, term-by-term reference (with the module each term lives in) is in the
 ## Documentation
 
 The deep-dive docs live in [`docs/`](docs/). Each is dual-audience (a senior engineer *and* an AI system
-parsing it) and verified against the `agents_never_sleep/` source for v1.4.0 (additive releases only; see `CHANGELOG.md`).
+parsing it) and verified against the `agents_never_sleep/` source for v1.5.0 (see `CHANGELOG.md` for the 1.5.0 enforcement-behaviour changes, which are not purely additive).
 
 **Foundations**
 - [Manifesto](docs/manifesto.md) — the *Autonomous Execution Governance* discipline: emergence, the ten principles, design principles, the Git-analogy thesis.

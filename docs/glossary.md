@@ -245,6 +245,22 @@ Which launcher env vars an `env:` ref may pull into the child is part of what a 
 sudoers rule, never `NOPASSWD: ALL` (which would hand an autonomous shell-executing agent a passwordless
 privilege-escalation primitive). Enforced by the launcher's identity / root-guard checks.
 
+**Deny-list floor** — The conservative, enumerated set of shell-command patterns
+(`enforcement.py::_IRREVERSIBLE`) DENYed/PARKed by default during an unattended run — force-push, remote
+branch/tag delete, destructive SQL, disk-destructive commands, secret-path Vault writes/deletes, mass Redis
+flush, docker volume delete, sending real email, package/release publishing, infra teardown, stateful
+`kubectl delete`, and other outward/destructive shapes. A **backstop against an honest mistake, not a
+boundary against evasion** — it inspects command text, not script contents. See *Consent manifest* for the
+one sanctioned way to widen it.
+
+**Consent manifest** — A human's run-setup pre-authorization of specific deny-list classes (e.g.
+`redis_flush`), recorded **out-of-repo** (`~/.config/agents-never-sleep/consent/`, TOFU-style — the
+unattended agent cannot author its own consent) via the interactive wizard's "Actions ANS may perform
+unattended" step. Frozen into the agent process as `UE_CONSENT` at launch; upgrades PARK→ALLOW only for a
+single clean shell statement matching exactly one consented class. Coarse (per-class / once / at-setup /
+whole-run / all-targets) — target-scoping is a deferred v2 item. Every consent-upgraded command is logged
+to an out-of-repo audit trail and surfaced in the morning report.
+
 ---
 
 ## Delegated verification (NOT an ANS capability)

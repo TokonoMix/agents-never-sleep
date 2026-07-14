@@ -523,7 +523,12 @@ PROCEED assumption is committed so it can be cheaply reverted. The genuinely irr
 — force-push, remote-branch delete, destructive SQL, secret deletion, disk wipe — are not *governed* on a
 guess; they are **denied at the tool layer by hooks**, which is the reversibility binary of §5: permit
 only the undoable, refuse the rest. This is why a wrong PROCEED during an unattended run is a five-minute
-revert rather than a disaster — the irreversible class never had a path to execution.
+revert rather than a disaster — by default the irreversible class has no path to execution. The one
+sanctioned exception is explicit and human-authored, not agent-granted: at interactive setup a human may
+pre-authorize a specific class for a run (the *consent manifest*), recorded out-of-repo so the unattended
+agent cannot widen its own floor — the same separation-of-concerns argument as principle 8, applied to the
+floor itself. And the denial is a backstop against an honest mistake, not a boundary against evasion: it
+matches command shapes, not script contents, so a non-shell wrapper can still slip past it.
 
 ### The pre-token launcher — least privilege, determinism, fail-safe
 

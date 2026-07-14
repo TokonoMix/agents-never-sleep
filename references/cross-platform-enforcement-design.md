@@ -52,9 +52,11 @@ reported, never assumed.
 Three units, each one purpose, testable in isolation:
 
 1. **`agents_never_sleep/enforcement.py` — the decision CORE (platform-neutral, pure).** Single source of truth
-   for: the irreversible-command patterns, the set of ask-tool names (`AskUserQuestion`, `ask_user`),
-   the canonical deny/block reason strings, and pure functions `is_irreversible(cmd)->(bool,kind)`,
-   `is_ask_tool(name)->bool`, and `decide(event, tool_name, command, sentinel_present)->Decision`.
+   for: the irreversible-command patterns, the set of ask-tool names (`AskUserQuestion`, `ask_user`, and
+   `clarify` added in v1.1), the canonical deny/block reason strings, and pure functions
+   `is_irreversible(command) -> list[str]` (returns every matched slug, not just the first — so a
+   command matching two kinds can't ride a single-class consent), `is_ask_tool(name)->bool`, and
+   `decide(event, *, tool_name=None, command=None, sentinel_present=False, consent=None) -> Decision`.
    No platform I/O. Tested once, exhaustively.
 
 2. **`agents_never_sleep/enforce.py` — the cross-platform DISPATCHER (CLI).** `python3 -m agents_never_sleep.enforce
@@ -66,6 +68,13 @@ Three units, each one purpose, testable in isolation:
    `deny_irreversible.sh` converged onto this dispatcher (`python3 -m agents_never_sleep.enforce
    claude pre_tool`) post-audit, so the irreversible pattern list now lives ONLY in enforcement.py —
    no duplicate copy left to drift.
+
+   `enforce.py::main()` additionally reads a frozen `UE_CONSENT` env var (set only by `launcher.py`
+   post-TOFU-trust, never a repo file) and passes it to `decide(..., consent=...)`; when exactly one
+   consented slug matches a single clean shell statement it emits ALLOW instead of DENY and appends the
+   event to an out-of-repo audit trail. This consent path lives in the shared dispatcher for any
+   platform's payload — it activates only for runs launched via `ans-run`; any other launch path gets no
+   consent and the floor holds.
 
 3. **`agents_never_sleep/capabilities.py` — capability detection + degradation reporting.** The matrix above as
    data: `guarantees(platform) -> {deny_irreversible, never_stop, never_ask: native|degraded}`, plus
@@ -85,6 +94,9 @@ Three units, each one purpose, testable in isolation:
   tool where supported, (c) a stop with the sentinel present where supported; and ALLOWS a benign command;
   and is inert when not unattended.
 - `test_capabilities.py` — matrix correctness + degradation notes for the ⚠️ cells.
+- `test_consent_gate` (in `test_enforcement.py`) — single-clean-statement consent upgrade, multi-slug
+  denial, chain/redirect/wrapper voiding; `test_consent_store.py` / `test_consent_audit.py` — out-of-repo
+  store + audit trail.
 
 ## Sources (researched 2026-06)
 - Gemini CLI hooks: https://geminicli.com/docs/hooks/reference/

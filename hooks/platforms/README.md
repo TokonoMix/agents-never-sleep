@@ -50,6 +50,14 @@ changing its hook API is the one failure mode outside ANS's control (SEMVER §D5
 4. For `never-stop` to work, the platform must see the run-incomplete sentinel — export
    `UE_RUN_INCOMPLETE=<repo>/.unattended/run-incomplete` (the driver writes that path).
 
+## Consent manifest
+
+The same dispatcher also honors a frozen `UE_CONSENT` env var, set only by the `ans-run` launcher
+after its TOFU trust gate — never by a repo file — to upgrade a specific pre-authorized action class
+from PARK/DENY to ALLOW for a single clean shell statement. This applies uniformly across every
+platform this dispatcher serves; a run started outside `ans-run` never receives `UE_CONSENT` and the
+deny-list floor holds unconditionally.
+
 ## Verification status
 
 These adapters are built to each platform's **documented** hook contract and proven hermetically by

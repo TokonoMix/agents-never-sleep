@@ -9,9 +9,12 @@ once wired they stay completely inert during your normal interactive sessions.
   soft-halting. Honours `stop_hook_active` → can never loop.
 - `deny_irreversible.sh` — **PreToolUse hook (matcher `Bash`).** Blocks genuinely irreversible /
   outward actions (force-push, remote branch/tag delete, destructive SQL, disk-destructive
-  commands, Vault secret delete/rotate, sending real email, service/volume teardown). It
+  commands, Vault secret delete/rotate, sending real email, `systemctl mask`, `docker volume rm`). It
   deliberately does **not** block the harness's own local `git reset --hard` / `git clean` revert
-  mechanism.
+  mechanism. These are a conservative backstop, not a boundary — a consented run-setup class can
+  upgrade a specific matched command to ALLOW for a single clean shell statement (see
+  `docs/security.md`); blunt `systemctl stop/restart`, bare `docker rm <container>`, and plain
+  `docker compose down` (no `-v`) are intentionally NOT denied.
 - `deny_ask.sh` — **PreToolUse hook (matcher `AskUserQuestion`).** Makes "never ASK" structural,
   the mirror of never-stop: there is nobody to answer at 2am, so a single question wastes the night.
   It DENIES `AskUserQuestion` and returns a reason that re-routes the agent into the contract — PARK

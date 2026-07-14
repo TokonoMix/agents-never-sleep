@@ -75,9 +75,14 @@ it never blocks the run, it only withholds the "trusted" stamp: an unvetted high
 Safety is enforced at the **code layer**, not by trusting the agent's mid-run discipline:
 
 - 🛑 **never-ASK** — the "ask the human" tool is denied; the agent is steered into PARK/PROCEED instead.
-- 🧨 **deny-irreversible** — destructive / outward commands are blocked at the source: force-push,
-  remote branch deletes, `rm -rf /`, destructive SQL, disk wipes, secret deletion/rotation, sending
-  real email, service/volume teardown. (The harness's *own* `git reset --hard` / `git clean` revert is
+- 🧨 **deny-irreversible** — destructive / outward commands are denied by default at the tool layer:
+  force-push, remote branch/tag deletes, `rm -rf` on root/home, destructive SQL, disk wipes, secret
+  deletion/rotation/overwrite, single+mass email, publishing, infra teardown, `systemctl mask`,
+  `docker volume rm` / `compose down -v`, power-state changes. A **backstop against an honest
+  mistake, not a boundary against evasion** — it matches shell syntax and can't see through a
+  non-shell wrapper (see `SECURITY.md`); an operator can pre-authorize specific classes for a run via
+  the setup-time **consent manifest**, otherwise the floor holds. (The harness's *own* `git reset
+  --hard`/`git clean` revert, and blunt `systemctl stop/restart` / `docker rm <container>`, are
   deliberately allowed.)
 - ⏳ **never-stop** — a premature end-of-turn is blocked while the backlog isn't drained (with an
   anti-infinite-loop backstop).

@@ -201,6 +201,12 @@ real (non-`--check`) launch asks for a `yes` confirmation before it spends any t
   review. Headless + untrusted = NO-GO. Trust is recorded outside the repo
   (`~/.config/agents-never-sleep/trusted.json`, keyed on the config's SHA-256) — the repo cannot
   vouch for itself. **Never run ans-run in a repo you trust less than its `make install`.**
+- **action consent (opt-in)** — the wizard's "actions" section can pre-authorize specific deny-list
+  floor classes (e.g. `send_email`, `redis_flush`) for this run. Consent lives OUT-OF-REPO
+  (`~/.config/agents-never-sleep/consent/…`, TOFU-style) so the unattended agent cannot author its
+  own consent; it is frozen into `UE_CONSENT` at launch and upgrades PARK→ALLOW only for a single
+  clean shell statement matching exactly one consented class. Missing/malformed → the floor holds.
+  Full model + honest limits: `SECURITY.md`.
 - **identity** — configurable `launcher.target_user` + root-guard: started as root with a target
   user configured → re-exec as that user; as root with none configured → NO-GO (an unattended run
   must never execute as root),

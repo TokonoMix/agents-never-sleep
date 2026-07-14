@@ -141,8 +141,9 @@ that ends "12 DONE, 2 parked decisions" did not fail on the 2 — it converted t
 assumptions into 5-second daylight calls.
 
 Scope note: only Claude Code is the live-verified enforcement platform; adapters for other agent
-CLIs are built to their documented hook contracts and are not live-verified. Install is from GitHub
-(`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`); PyPI is not live.
+CLIs are built to their documented hook contracts and are not live-verified. Install:
+`pip install agents-never-sleep` (live on PyPI since v1.4.0), or pinned from GitHub
+(`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`).
 
 ---
 

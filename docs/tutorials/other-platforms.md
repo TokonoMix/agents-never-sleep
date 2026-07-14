@@ -38,6 +38,11 @@ guarantee (`agents_never_sleep/capabilities.py`), never a silent drop.
 | Cursor | ✅ native | 🟡 soft-enforced (stop hook can't block) | 🟡 soft-enforced (no pre-ask hook) |
 | Windsurf | ✅ native | 🟡 soft-enforced (no stop event) | 🟡 soft-enforced (no pre-ask hook) |
 
+The consent manifest (see [glossary](../glossary.md#security)) is platform-neutral: it's read by
+`enforce.py`'s shared `decide()` call regardless of which platform's dispatcher invoked it, so a
+pre-authorized class applies identically whether the enforcement hook fired from Claude Code, Codex,
+Gemini, Copilot, Cursor, or Windsurf.
+
 All adapters are **env-gated**: the dispatcher is inert unless `UE_UNATTENDED=1` (or
 `CLAUDE_UNATTENDED=1`) is set, so wiring the hooks changes nothing in your normal interactive
 sessions. For never-stop to work, the platform must see the sentinel — export
@@ -132,8 +137,8 @@ pre-ask hook) — prose contract + blind-spot report.
   documented-contract-built and hermetically tested; the live smoke-test on each real tool is the
   remaining manual step. When you run one, you are that verification — please report what you find.
 
-Install is from GitHub (`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`);
-PyPI is not live.
+Install: `pip install agents-never-sleep` (live on PyPI since v1.4.0), or pinned from GitHub
+(`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`).
 
 ---
 

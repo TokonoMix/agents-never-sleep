@@ -8,7 +8,11 @@
 
 ## 1. Install
 
-PyPI is not live yet — install from the tagged GitHub release:
+```bash
+pip install agents-never-sleep
+```
+
+or, pinned to a tagged GitHub release:
 
 ```bash
 pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0
@@ -61,6 +65,13 @@ two decisions worth attention:
   permission rules. Setting `autonomy_confirmed: true` is the explicit human decision the launcher
   requires; an unconfirmed preset refuses to launch detached (a deliberate NO-GO instead of a
   silent stall).
+
+**Pre-authorize deny-list classes (optional).** The wizard then asks, once per deny-list class,
+whether to pre-authorize it for this run (default no). Consent applies to the WHOLE run across
+every reachable target of that class — there's no per-call check — so only say yes for a
+high-blast-radius class (`redis_flush`, `send_email`, …) on a run confined to a non-critical
+environment. Consent is stored out-of-repo and frozen into the run; see
+[glossary](../glossary.md#security).
 
 ## 3. Trust the config (TOFU)
 
@@ -122,6 +133,13 @@ interactive sessions), registered via Claude Code's hooks config:
 | `deny_ask.sh` | PreToolUse (`AskUserQuestion`) | DENIES asking the human — steers the agent back into PARK/PROCEED; nobody answers at 2am |
 | `deny_irreversible.sh` | PreToolUse (`Bash`) | DENIES the irreversible class: force-push, remote deletes, destructive SQL, `rm -rf /`, … |
 | `stop_guard.sh` | Stop | BLOCKS a premature stop while `.unattended/run-incomplete` exists — the never-stop guarantee |
+
+The `deny_irreversible.sh` row's list is representative, not exhaustive: it also denies sending real
+mail, Vault secret-path writes, mass Redis flush, docker volume deletes, package/release publishing,
+and infra teardown. Conversely, `systemctl stop`/`restart`, a bare `docker rm`, `docker push`, and
+`redis-cli get`/`set` are ALLOWED — they aren't in the enumerated class. This deny-list floor can also
+be selectively lifted per class via the run-setup consent step (§2) — see
+[glossary](../glossary.md#security) — so don't read this table as absolute.
 
 The agent drives the loop itself: `next` → implement → `complete` → `next` … until a terminal
 status. The harness owns snapshot-before-edit, gate-after-edit, revert-on-red, attempt caps, loop
