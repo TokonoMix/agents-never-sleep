@@ -63,6 +63,14 @@ The run-setup consent manifest (v1.5.0) is deliberately coarse: a pre-authorized
 **whole run** across every reachable target. Scoping consent to specific hosts/URLs/recipients (so
 `send_email` could be pre-authorized only for one domain) is the planned v2 refinement — not built today.
 
+### 7. Per-task settings
+Consent, consensus-eligibility and gate strictness are today set **once per run** — the whole backlog
+inherits one policy. A planned refinement lets a single ticket carry its own overrides: pre-authorize one
+deny-list class for just this ticket, mark just this ticket eligible for a consensus-assisted resolution
+attempt, or tighten (never loosen below the floor) its gate. The unit of governance becomes the ticket, not
+only the run. This composes with §6: per-task scoping is the finer grain of the same consent model, not a
+separate mechanism — and, like everything above, it never lets an unattended agent widen its own authority.
+
 ## What is deliberately NOT on the roadmap
 
 To keep the scope boundary honest: ANS will **not** grow into a code generator, a model, a correctness
