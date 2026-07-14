@@ -68,7 +68,8 @@ IRREVERSIBLE = {
     "claude":   {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}},
     "gemini":   {"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /"}},
     "codex":    {"tool_name": "Bash", "tool_input": {"command": "vault kv delete secret/x"}},
-    "copilot":  {"toolName": "bash", "toolArgs": {"command": "systemctl stop nginx"}},
+    # deny-list floor (2026-07-14): bare `systemctl stop` moved ALLOW; `mask` is the floor concern.
+    "copilot":  {"toolName": "bash", "toolArgs": {"command": "systemctl mask nginx"}},
     "cursor":   {"command": "dd if=/dev/zero of=/dev/sda"},
     "windsurf": {"tool_info": {"command_line": "mkfs.ext4 /dev/sda1"}},
     # v1.2 — crush (shell hook) + opencode (JS plugin) both send the DEFAULT dispatcher
