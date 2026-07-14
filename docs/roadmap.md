@@ -18,11 +18,11 @@ claim against the `agents_never_sleep/` source.
 
 ## Direction
 
-### 1. PyPI publish
-1.0.0 is distributed via the GitHub release today (`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`).
-A bare `pip install agents-never-sleep` becomes available once the package is published to PyPI — a
-deliberate, separate release step, not yet done. Until then, the docs do not present the bare install as
-working.
+### 1. PyPI publish — shipped (v1.4.0, 2026-07-12)
+The bare `pip install agents-never-sleep` is live on PyPI; a tag push (`v*`) auto-publishes via GitHub
+Actions Trusted Publishing (OIDC, no stored token). The pinned/dev fallback
+(`pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.4.0` or `@main`) remains available for
+anyone who wants a specific tag or an unreleased checkout.
 
 ### 2. More live-verified platforms
 Today **only Claude Code is live-verified**. The other hosts are **built to their documented hook
@@ -57,6 +57,11 @@ the ecosystem — execution (ANS) → decision-making/verification (Council MCP)
 provider-selection (Routing) → long-term context (Memory) — each standalone-usable but stating its place.
 The delegated-council integration is the first such seam; more adjacent responsibilities get the same
 clean-boundary treatment over time. See the [glossary](glossary.md) ecosystem table.
+
+### 6. Consent target-scoping (v2)
+The run-setup consent manifest (v1.5.0) is deliberately coarse: a pre-authorized class applies to the
+**whole run** across every reachable target. Scoping consent to specific hosts/URLs/recipients (so
+`send_email` could be pre-authorized only for one domain) is the planned v2 refinement — not built today.
 
 ## What is deliberately NOT on the roadmap
 

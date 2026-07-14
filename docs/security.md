@@ -2,10 +2,13 @@
 
 > **30-second version.** An unsupervised agent that can edit files and run shells is a real security
 > surface. ANS bounds it with four design guarantees: **never ASK** unattended (an ask-tool is denied),
-> **never do something irreversible** unsupervised (force-push, remote branch/tag delete, destructive SQL,
-> `mkfs`/`dd of=/dev/…`/`shred` are denied by hooks), **never leak a secret** into a log or report
+> **never do something irreversible** unsupervised (force-push, remote branch/tag delete, release-tag push,
+> destructive SQL, `mkfs`/`dd of=/dev/…`/`shred`, secret Vault writes, Redis mass-flush, `docker volume rm`,
+> email send, publishing, infra teardown, stateful `kubectl delete`, `systemctl mask`, and more are denied by
+> hooks — a representative list, not exhaustive), **never leak a secret** into a log or report
 > ([secret redaction](secrets.md)), and **least privilege** (resolve credentials from a server-managed
-> source, never run as root). These are guarantees to *test against*, not aspirations. See
+> source, never run as root). A run-setup consent manifest additionally lets a human pre-authorize specific
+> irreversible-op classes for a given run. These are guarantees to *test against*, not aspirations. See
 > [launcher](launcher.md), [secrets](secrets.md), [glossary](glossary.md).
 
 ## The threat model: an agent that runs for hours with no one watching
@@ -25,9 +28,23 @@ vulnerability.
    `AskUserQuestion` tool; the run PARKs or PROCEEDs, never blocks. A blocking question mid-run is both a
    stall and an availability problem; ANS removes the possibility structurally.
 2. **Never-irreversible unsupervised.** The deny-hooks block the operations that cannot be undone
-   afterward: `git push --force`, remote branch/tag deletion, destructive SQL, and disk-destructive
-   commands (`mkfs`, `dd of=/dev/…`, `shred`). The reversibility safety net (git snapshot/revert) handles
-   the reversible mistakes; the hooks handle the ones no revert can fix.
+   afterward: `git push --force`, remote branch/tag deletion, release-tag push, mirror push, destructive
+   SQL, disk-destructive commands (`mkfs`, `dd of=/dev/…`, `shred`), secret-path Vault writes and
+   delete/rotate-root, `redis-cli flush(all|db)`, `docker volume rm`, single and mass email send,
+   publishing, infra teardown (`terraform destroy`, `aws s3 rb`/`rm --recursive`), stateful `kubectl
+   delete`, `systemctl mask`, `crontab -r`, and recursive `chmod`/`chown` on root/home, among others. This
+   is a **backstop, not a boundary**: the matcher is shape-anchored against the shell text a tool call
+   carries, not the semantics of what a script does, so it stops the honest mistake, not a determined
+   attempt to route the same command through a non-shell wrapper. The reversibility safety net (git
+   snapshot/revert) handles the reversible mistakes; the hooks handle the ones no revert can fix.
+
+   **Consent manifest (the escape hatch).** At interactive `ans-run` setup a human can pre-authorize
+   specific floor classes for a run; consent is stored out-of-repo (the agent can't author its own),
+   frozen at launch into `UE_CONSENT` (a repo-local/agent-writable file is never trusted), and upgrades
+   PARK→ALLOW only for a single clean shell statement matching exactly one consented class. It is
+   per-class/once/whole-run/every-reachable-target — coarse by design, not per-target-scoped (deferred
+   v2). Every consent-upgraded ALLOW is written to an out-of-repo audit trail and surfaced in the morning
+   report.
 3. **Secret redaction.** `redact.py` strips keys, tokens, and connection-string passwords from everything
    the run writes out — the run report, gate artefacts, Paperclip comments, emitted JSON, even the
    free-text `attempted` / `exact_blocker` fields. See [secrets](secrets.md) for how (shape-anchored
@@ -89,13 +106,17 @@ the external Tokonomix Council MCP, advisory only) and it does not choose models
 ## Limitations
 
 The deny-hooks block an enumerated set of irreversible operations; a novel destructive command outside the
-patterns could slip through (the patterns are a backstop, the broader defense is least privilege + running
-in a constrained user/container). Live verification exists only on Claude Code today. Redaction is
-shape-anchored + registry-based and stdlib-only — it is robust but not a proof that no secret in any shape
-can ever appear. Report vulnerabilities per `SECURITY.md`.
+patterns could slip through, and this is broader than novelty — *any* known dangerous command routed
+through a python subprocess, a git alias, or a base64-encoded script evades the patterns outright, because
+the literal substrings the matcher looks for never appear on the shell line (the patterns are a backstop,
+the broader defense is least privilege + running in a constrained user/container). The consent manifest has
+its own honest limit: it is coarse — whole-run, all-targets — with no per-invocation or per-target scoping
+(deferred v2). Live verification exists only on Claude Code today. Redaction is shape-anchored +
+registry-based and stdlib-only — it is robust but not a proof that no secret in any shape can ever appear.
+Report vulnerabilities per `SECURITY.md`.
 
 ---
 
 *Verified against `agents_never_sleep/` (v1.0.0): `redact.py`, `keysource.py`, `enforce.py`,
-`enforcement.py`, `capabilities.py`, the `deny_ask` / `deny_irreversible` / Stop hooks in `hooks/`,
-`launcher.py` (root-guard, TOFU), `SECURITY.md`.*
+`enforcement.py`, `capabilities.py`, `consent_store.py`, the `deny_ask` / `deny_irreversible` / Stop hooks
+in `hooks/`, `launcher.py` (root-guard, TOFU), `SECURITY.md`.*

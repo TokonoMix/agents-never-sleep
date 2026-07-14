@@ -31,6 +31,11 @@ running ANS instance.
    on the config's SHA-256 and recorded *outside* the repo (`~/.config/agents-never-sleep/trusted.json`),
    because the repo cannot vouch for itself. **Headless + untrusted = NO-GO.** Any config change
    invalidates the trust (`trust.py`). *Never run `ans-run` in a repo you trust less than its `make install`.*
+   If the same interactive wizard session pre-authorized any deny-list classes (see
+   [glossary](glossary.md#security)), the launcher reads them from the out-of-repo consent store
+   and freezes them into the child process as `UE_CONSENT` (plus an audit-trail path `UE_CONSENT_AUDIT`)
+   immediately after this trust check — never re-read from the repo mid-run, so the unattended agent
+   cannot author or widen its own consent.
 2. **Identity / root-guard.** Started as root with a `launcher.target_user` configured → **re-exec as that
    user** (credentials, settings, and repo ownership live in the user's HOME). Started as root with **no**
    target user → **NO-GO** (an unattended run must never own the machine as root). The re-exec keeps the

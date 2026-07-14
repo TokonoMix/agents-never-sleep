@@ -62,8 +62,9 @@ argument):
    and inconsistently. ANS makes them with enumerated rules.
 3. **Least privilege + fail-safe.** An unsupervised agent that can edit files and run shells is powerful;
    governance is what bounds that power (reversibility, blast-radius tiering, the pre-token launcher
-   gate). The safe default is always the conservative one — park, revert, flag for daylight — never the
-   silent risky one.
+   gate, the deny-list floor, and the run-setup consent manifest that lets a human narrow it for a
+   specific run). The safe default is always the conservative one — park, revert, flag for daylight —
+   never the silent risky one.
 
 ## What governance produces
 
@@ -77,6 +78,8 @@ governed run produce a durable, auditable trail:
 - **A run report** (`report.py`) — what got done, what parked and why, what needs daylight review,
   what it cost, and any blind spots. Governance turns a run of autonomous work into a few quick
   human decisions.
+- **Consent provenance** — every consent-upgraded action is logged to an out-of-repo audit trail and
+  surfaced in the run report, so a pre-authorized class is never invisible after the fact.
 
 ## What governance is NOT
 

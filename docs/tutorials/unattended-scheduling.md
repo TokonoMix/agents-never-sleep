@@ -27,8 +27,11 @@ A scheduled launch is headless, so everything interactive must already be done:
   mode is a blocking NO-GO (it would hang silently on the first tool prompt).
 - **Dry-run the preflight** — `bin/ans-run --check --repo /path/to/project` prints the full GO/NO-GO
   report without launching anything.
+- **Consent is decided (if needed)** — any deny-list class you want pre-authorized for this scheduled
+  run (e.g. `send_email` for a legitimate notification) must be granted during the interactive wizard
+  session, before the job is scheduled headless — the unattended run cannot grant it later.
 
-Install is from GitHub (PyPI is not live):
+Install: `pip install agents-never-sleep` (live on PyPI since v1.4.0), or pinned from GitHub:
 `pip install git+https://github.com/TokonoMix/agents-never-sleep@v1.0.0`.
 
 ## 1. The command you are scheduling
@@ -198,6 +201,9 @@ Two env vars make the enforcement layer and the harness agree at 2am:
   advisory: `next` hard-fails (`status: "ERROR"`) when it detects unattended mode + CWD ≠ `--repo` +
   `UE_RUN_INCOMPLETE` unset, so a never-stop guarantee that would have silently broken breaks
   loudly instead.
+- **`UE_CONSENT` / `UE_CONSENT_AUDIT`** are frozen into the agent's env by the launcher itself (from the
+  out-of-repo consent store) after the TOFU trust check — nothing to set in your cron/systemd unit; do
+  not set these by hand.
 
 ## 7. Long backlogs — `fresh_session_every`
 

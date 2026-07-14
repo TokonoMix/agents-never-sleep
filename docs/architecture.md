@@ -40,7 +40,8 @@ none of them is a model.
 | **Scheduler / breaker** | `orchestrator.py` | Pick the next *independent* ticket; trip the low-yield circuit breaker when most work is parked/blocked/failing. |
 | **Agent-as-worker driver** | `driver.py` | Invert the loop so the *agent* implements one ticket per call; own the run-incomplete sentinel. |
 | **Preflight** | `preflight.py` | Measure capabilities (VCS, gates, integrations) after the session boots; never stop the run, only lower expected yield. |
-| **Launcher** | `launcher.py` (`bin/ans-run`) | Pre-token GO/NO-GO gate: config trust, identity, agent selection, credentials, repo health, host checks, working-tree flock. |
+| **Enforcement (hooks)** | `enforcement.py`, `enforce.py`, `consent_store.py` | Provider-neutral deny-list floor for irreversible/outward shell commands + never-ASK / never-stop, dispatched per-platform (a backstop, not an evasion boundary). A run-setup **consent manifest** (out-of-repo, TOFU-style) can pre-authorize specific classes for a run. |
+| **Launcher** | `launcher.py` (`bin/ans-run`) | Pre-token GO/NO-GO gate: config trust, identity, agent selection, credentials, repo health, host checks, working-tree flock. Freezes the consent manifest into the agent env (`UE_CONSENT`) after the trust gate. |
 | **Watchdog** | `watchdog.py` | Sidecar that restarts a *hung* run (the gap the Stop-hook cannot see) and alerts on exhausted restarts. |
 | **Secret redaction** | `redact.py` | Shape-anchored scrubbing of credential-shaped values from the report, gate artefacts, comments, and emitted JSON. |
 | **Keysource** | `keysource.py` | Resolve `env:` / `vault:` token-refs into credentials; never a literal in the config; degrade to a blind spot, never a silent empty value. |

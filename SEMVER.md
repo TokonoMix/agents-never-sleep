@@ -12,8 +12,8 @@ This file complements two existing documents — read them together:
 - **`CHANGELOG.md`** — the per-version record of what changed; it already carries a "Roadmap to
   v1.0" list, which §4 here makes concrete and checkable.
 
-The current published version is **`1.3.0`** (source of truth: `agents_never_sleep/__init__.py`
-`__version__`), tagged `v1.3.0` on 2026-07-08 (`pip install git+…@v1.3.0`).
+The current published version is **`1.5.0`** (source of truth: `agents_never_sleep/__init__.py`
+`__version__`), tagged `v1.5.0` on 2026-07-14 (`pip install git+…@v1.5.0`).
 
 ---
 
@@ -68,7 +68,8 @@ about the one seam it doesn't.
 |---|---|---|
 | `ans-run [--repo] [--agent] [--fg] [--check] [--trust] PROMPT...` | **Stable** | Flags + exit codes (0 / 64 NO-GO / 65 busy). |
 | `.claude/agents-never-sleep.json` `launcher` section (presets, `target_user`, `checks`, `credentials_paths`, `min_disk_mb`, `fresh_session_every`) | **Stable** | Additive keys = MINOR. |
-| `ANS_RUN_NO_LOCK`, `ANS_TRUST_STORE` env vars | **Experimental** | Escape hatches / test hooks — **kept Experimental at 1.0 (decision D4)**. `ANS_TRUST_STORE` is honored only under `ANS_TEST_MODE=1` (a test fixture, not a runtime knob); `ANS_RUN_NO_LOCK=1` bypasses the working-tree lock (an operator escape). Neither is a behaviour a 1.0 should freeze. |
+| `ANS_RUN_NO_LOCK`, `ANS_TRUST_STORE`, `ANS_CONSENT_STORE` env vars | **Experimental** | Escape hatches / test hooks — **kept Experimental at 1.0 (decision D4)**. `ANS_TRUST_STORE` and `ANS_CONSENT_STORE` are each honored only under `ANS_TEST_MODE=1` (test fixtures, not runtime knobs — `ANS_CONSENT_STORE` overrides the out-of-repo consent-manifest path the same way `ANS_TRUST_STORE` overrides the trust-store path); `ANS_RUN_NO_LOCK=1` bypasses the working-tree lock (an operator escape). None of the three is a behaviour a 1.0 should freeze. |
+| `UE_CONSENT`, `UE_CONSENT_AUDIT` env vars | **Experimental** | Launcher-internal transport only — the launcher sets these after the TOFU trust gate, from the out-of-repo consent store, so the agent process can see the run-setup consent decisions and their audit trail. Not operator-configurable; their absence in your own env is expected, not an oversight. |
 
 ### 2.3 Ticket format (ARCHITECTURE.md §2)
 

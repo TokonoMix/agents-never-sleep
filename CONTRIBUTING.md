@@ -39,11 +39,17 @@ It runs `bash scripts/redact_lint.sh` and blocks the commit if the gate fails.
 ## Pull requests
 
 - Keep the two structural guarantees intact: **never ASK in unattended mode**,
-  **never act irreversibly unsupervised**. New code paths must respect them.
+  **never act irreversibly unsupervised**. New code paths must respect them. The one sanctioned
+  exception is the consent manifest: a human's run-setup, out-of-repo pre-authorization of a specific
+  deny-list class (see [glossary](docs/glossary.md#security)) — not a code path that lets the
+  agent decide for itself.
 - Add/extend acceptance tests for behaviour changes; the suite must stay GREEN.
 - Never commit secrets, runtime state (`.unattended/`, `state/`, reports), or real
   credentials. Test fixtures must be obviously fake.
 - Surgical, focused changes; match the existing style.
+- Adding a new irreversible-command pattern? It goes in `enforcement.py::_IRREVERSIBLE` only (the sole
+  copy every platform shares) with a stable, never-renamed slug — that slug is a consent-manifest key.
+  Don't duplicate the pattern in SKILL.md, a hook file, or platform-specific code.
 
 ## Surface parity (public knowledge)
 
