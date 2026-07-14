@@ -35,11 +35,17 @@ def _run_wizard_isolated(profile, answers):
     all redirected so the test never touches the real home dir or a real tty."""
     work = tempfile.mkdtemp(prefix="ans-wizard-test-")
     trust_store = os.path.join(work, "trusted.json")
+    consent_store = os.path.join(work, "consent")
     try:
+        # ANS_CONSENT_STORE too: the wizard's new pre-authorize-actions section (t02) writes the
+        # out-of-repo consent store when any slug is ticked — extra "y" answers here spill into
+        # those prompts, so without this redirect the test would leak files into the real
+        # ~/.config/agents-never-sleep/consent tree.
         with unittest.mock.patch("agents_never_sleep.config.is_interactive", return_value=True), \
              unittest.mock.patch("agents_never_sleep.agent_clis.installed_clis", return_value=[]), \
              unittest.mock.patch("builtins.input", side_effect=_canned_input(answers)), \
              unittest.mock.patch.dict(os.environ, {"ANS_TRUST_STORE": trust_store,
+                                                    "ANS_CONSENT_STORE": consent_store,
                                                     "ANS_TEST_MODE": "1"}):
             return config.run_wizard(os.path.join(work, "repo"), profile)
     finally:
