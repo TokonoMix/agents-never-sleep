@@ -308,7 +308,7 @@ def run_wizard(repo_dir: str, profile) -> dict:
     # Launcher presets: scaffold one preset per INSTALLED known agent CLI, and make the
     # autonomy decision explicit per CLI (security review 2026-06-10: autonomy flags are
     # never applied silently — the human sees what the flag grants and confirms).
-    from .agent_clis import AGENT_CLIS, detect_session_platform, installed_clis
+    from .agent_clis import AGENT_CLIS, detect_session_platform, installed_clis, scaffold_preset
     launcher = cfg["launcher"]
     found = installed_clis()
     if found:
@@ -320,11 +320,7 @@ def run_wizard(repo_dir: str, profile) -> dict:
             print(f"    this flag: {spec['grants']}")
             confirmed = ask(f"  Confirm this autonomy flag for {name}? (y/n)",
                             "n").lower().startswith("y")
-            launcher["agents"][name] = {
-                "cmd": spec["cmd_unattended"] if confirmed else spec["cmd_safe"],
-                "autonomy_confirmed": confirmed,
-                "env": {},
-            }
+            launcher["agents"][name] = scaffold_preset(name, confirmed=confirmed)
             if not confirmed:
                 print(f"    {name} saved WITHOUT autonomy — detached launches with it "
                       "will refuse until you confirm (re-run the wizard or edit the "

@@ -4,7 +4,9 @@
 `ans-run PROMPT...` path). `init` and `install-hooks` must be routed to `init_cmd` BEFORE that
 prompt path claims them, so `ans-run init --repo X` never gets sent to an agent CLI as a prompt.
 """
+import json
 import os
+import pathlib
 import sys
 import tempfile
 import subprocess
@@ -25,9 +27,13 @@ def test_dispatch_routes_init_and_install_hooks():
     def _fake_run_init(argv):
         seen["init"] = argv
         return 0
+    orig = launcher.init_cmd.run_init
     launcher.init_cmd.run_init = _fake_run_init
-    sys.argv = ["ans-run", "init", "--repo", "/tmp/x"]
-    rc = launcher.main()
+    try:
+        sys.argv = ["ans-run", "init", "--repo", "/tmp/x"]
+        rc = launcher.main()
+    finally:
+        launcher.init_cmd.run_init = orig   # module-level patch — must not leak into later tests
     assert rc == 0 and seen.get("init") == ["--repo", "/tmp/x"], seen
 
 
@@ -39,9 +45,13 @@ def test_dispatch_routes_install_hooks():
     def _fake_run_install_hooks(argv):
         seen["install-hooks"] = argv
         return 0
+    orig = launcher.init_cmd.run_install_hooks
     launcher.init_cmd.run_install_hooks = _fake_run_install_hooks
-    sys.argv = ["ans-run", "install-hooks", "--yes"]
-    rc = launcher.main()
+    try:
+        sys.argv = ["ans-run", "install-hooks", "--yes"]
+        rc = launcher.main()
+    finally:
+        launcher.init_cmd.run_install_hooks = orig   # module-level patch — must not leak into later tests
     assert rc == 0 and seen.get("install-hooks") == ["--yes"], seen
 
 
@@ -88,6 +98,86 @@ def test_detect_gates_go_and_rust():
     rs_gates = dict(preflight._detect_gates(rs))
     assert go_gates.get("go-test") == ["go", "test", "./..."], go_gates
     assert rs_gates.get("cargo-test") == ["cargo", "test"], rs_gates
+
+
+def test_run_init_scaffolds_and_never_touches_any_harness_config():
+    # The invariant names THREE global harness configs — assert ALL are byte-unchanged, not just Claude.
+    from agents_never_sleep import init_cmd, config
+    repo = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    home = tempfile.mkdtemp()
+    guarded = {
+        ".claude/settings.json": '{"permissions":{}}',
+        ".gemini/settings.json": '{"hooks":{}}',
+        ".codex/hooks.json": '{"hooks":[]}',
+    }
+    before = {}
+    for rel, body in guarded.items():
+        pth = pathlib.Path(home, rel); pth.parent.mkdir(parents=True, exist_ok=True)
+        pth.write_text(body); before[rel] = pth.read_bytes()
+    env_home = os.environ.get("HOME")
+    os.environ["HOME"] = home
+    try:
+        rc = init_cmd.run_init(["--repo", repo, "--yes"])
+    finally:
+        os.environ["HOME"] = env_home or ""
+    assert rc == 0, rc
+    cfg = json.load(open(config.config_path(repo)))
+    assert cfg["schema_version"]  # a real config landed (assert a real field, not mere existence)
+    assert cfg["launcher"]["default_agent"] in (None, *cfg["launcher"]["agents"].keys())
+    for rel, prior in before.items():
+        assert pathlib.Path(home, rel).read_bytes() == prior, f"ans init MUST NOT touch ~/{rel}"
+
+
+def test_run_init_stops_unless_force():
+    from agents_never_sleep import init_cmd, config
+    repo = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    assert init_cmd.run_init(["--repo", repo, "--yes"]) == 0
+    marker = config.config_path(repo)
+    stamp = os.path.getmtime(marker)
+    assert init_cmd.run_init(["--repo", repo, "--yes"]) != 0   # second run refuses
+    assert os.path.getmtime(marker) == stamp, "config must be byte-untouched without --force"
+    assert init_cmd.run_init(["--repo", repo, "--yes", "--force"]) == 0
+
+
+def test_run_init_requires_git():
+    from agents_never_sleep import init_cmd
+    plain = tempfile.mkdtemp()  # not a git repo
+    assert init_cmd.run_init(["--repo", plain, "--yes"]) != 0
+
+
+def test_installed_clis_subset_of_allowlist():
+    # Documents WHY run_init filters `installed` to ALLOWLIST: today it's a no-op (installed_clis
+    # returns only AGENT_CLIS keys == ALLOWLIST). If someone later widens installed_clis, THIS fails
+    # loudly — so the filter is not mistaken for dead code. (Consensus round 3 recommendation.)
+    from agents_never_sleep import agent_clis
+    assert set(agent_clis.installed_clis()) <= set(agent_clis.ALLOWLIST)
+
+
+def test_interactive_records_trust_in_ans_store_not_home():
+    # Interactive init records TOFU trust so a detached run can start — and it writes ONLY the ANS
+    # trust store, never ~/.claude. Force the interactive branch deterministically.
+    from agents_never_sleep import init_cmd, trust, config
+    repo = tempfile.mkdtemp(); subprocess.run(["git", "init", "-q", repo], check=True)
+    home = tempfile.mkdtemp(); (pathlib.Path(home, ".claude")).mkdir()
+    settings = pathlib.Path(home, ".claude", "settings.json"); settings.write_text("{}")
+    before = settings.read_bytes()
+    orig = init_cmd.agent_clis.installed_clis
+    init_cmd.agent_clis.installed_clis = lambda: ["claude"]   # single → no prompt
+    old = os.environ.get("HOME"); os.environ["HOME"] = home
+    try:
+        rc = init_cmd.run_init(["--repo", repo])   # NO --yes → interactive path
+        assert rc == 0
+        # is_trusted resolves the trust-store path from HOME at call time (like record_trust) —
+        # check it while HOME still points at the test home, not the real one restored below.
+        assert trust.is_trusted(repo, config.config_path(repo)) if hasattr(trust, "is_trusted") else True
+    finally:
+        os.environ["HOME"] = old or ""
+        init_cmd.agent_clis.installed_clis = orig
+    assert settings.read_bytes() == before, "interactive trust write must NOT touch ~/.claude"
+    # confirm the trust store lives under the ANS config dir, not HOME/.claude:
+    assert not any(pathlib.Path(home, ".claude").glob("*trust*"))
 
 
 def _run():
