@@ -974,6 +974,7 @@ def main() -> int:
     # enforce.py reads consent ONLY from this env var; a child cannot rewrite its parent's env.
     from . import consent_store
     child_env["UE_CONSENT"] = json.dumps((consent_store.read(repo) or {}).get("actions") or {})
+    child_env["UE_CONSENT_AUDIT"] = consent_store.audit_path(repo)
     check_agent_binary(agent_argv, agent_env, child_env, cfg, rep)
     check_credentials(cfg, rep)
     check_git(repo, rep)

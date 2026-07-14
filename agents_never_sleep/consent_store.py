@@ -63,6 +63,54 @@ def read(repo_dir: str) -> dict:
         return {}
 
 
+def audit_path(repo_dir: str) -> str:
+    """Where consent-upgraded actions for this repo get logged (t04). Same per-repo keying as
+    `_store_path` (a hash of the repo's realpath, never the path itself), so the audit trail lives
+    beside the consent grant it records — out-of-repo, for the same TOFU reason `_store_dir`
+    documents above."""
+    return os.path.join(_store_dir(), f"{_repo_id(repo_dir)}.audit.jsonl")
+
+
+def append_audit(path: str, event: dict) -> None:
+    """Append ONE json-line audit event. Best-effort: an audit-write failure must never block or
+    slow the enforcement hook it's called from — enforcement itself is NOT best-effort, only this
+    trail is. Swallow every OSError (missing parent, permissions, full disk, ...)."""
+    try:
+        fsutil.ensure_private_dir(os.path.dirname(path))
+        is_new = not os.path.exists(path)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+        if is_new:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def read_audit(path: str) -> list[dict]:
+    """Fail-safe read of the audit trail — missing/unreadable file -> []; a malformed line is
+    skipped (never raises), so one corrupt line can't hide the rest of the trail."""
+    events: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            events.append(data)
+    return events
+
+
 def write(repo_dir: str, *, actions: dict, by: str, backlog_fingerprint: str | None = None) -> None:
     """Persist which deny-list action classes are pre-authorized for this repo. Atomic
     (tempfile + fsync + os.replace), store dir created private (0700) via fsutil, file

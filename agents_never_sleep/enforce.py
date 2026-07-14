@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 from .enforcement import Action, decide
 from .fsutil import ensure_private_dir
@@ -53,6 +54,28 @@ def _consent() -> dict:
     except (ValueError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _audit_consent_allow(kind: str, command) -> None:
+    """Log a consent-upgraded ALLOW to the trail the launcher pinned via UE_CONSENT_AUDIT (t04),
+    so a human can later see exactly which commands rode the deny-list floor down. Best-effort and
+    defensive end-to-end: no path -> no-op; any failure (bad import, bad env, I/O) is swallowed —
+    a hook must never wedge or slow a tool call over an audit write. No `ticket` field: there is no
+    UE_CURRENT_TICKET env exposed to this hook.
+    """
+    try:
+        path = os.environ.get("UE_CONSENT_AUDIT")
+        if not path:
+            return
+        from . import consent_store
+        event = {
+            "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "slug": kind.split(":", 1)[1],
+            "command": command,
+        }
+        consent_store.append_audit(path, event)
+    except Exception:
+        pass
 
 
 def _read_stdin() -> dict:
@@ -201,7 +224,11 @@ def main(argv=None) -> int:
     if event == "pre_tool":
         tool_name, command = _normalize(platform, payload)
         d = decide("pre_tool", tool_name=tool_name, command=command, consent=_consent())
-        return _emit_deny(platform, d.reason) if d.action == Action.DENY else 0
+        if d.action == Action.DENY:
+            return _emit_deny(platform, d.reason)
+        if d.action == Action.ALLOW and (d.kind or "").startswith("consent:"):
+            _audit_consent_allow(d.kind, command)
+        return 0
 
     return 0
 

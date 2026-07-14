@@ -7,8 +7,11 @@ truth; Paperclip mirroring + push are Slice-2/Phase-2.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 
+from . import consent_store
 from .redact import redact
 from .state import OutcomeState
 
@@ -37,12 +40,34 @@ _LOW_YIELD = {
 }
 
 
+def frozen_consent_provenance() -> tuple[dict, list]:
+    """The report's ONLY source for consent provenance (t04) — the env vars the launcher froze at
+    launch time (UE_CONSENT, UE_CONSENT_AUDIT), NEVER a re-read of the consent store by repo path.
+    An isolated-worktree run has a different realpath than where the wizard captured consent, so
+    a store re-read keyed on the CURRENT repo would miss the grant entirely; the env is already
+    pinned to the primary repo and inherited by whatever in-session agent renders this report.
+
+    Fail-safe: a missing/malformed UE_CONSENT reads as {} (never raises); a non-dict payload is
+    also {}. UE_CONSENT_AUDIT unset/unreadable -> [] (read_audit is itself fail-safe).
+    """
+    try:
+        manifest = json.loads(os.environ.get("UE_CONSENT") or "{}")
+    except ValueError:
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    audit = consent_store.read_audit(os.environ.get("UE_CONSENT_AUDIT") or "")
+    return manifest, audit
+
+
 def build_report(outcomes: list, *, run_label: str = "unattended run",
                  halted: bool = False, halt_reason: str = "",
                  stopped_low_yield: bool = False, notes=(),
                  work_branch: str | None = None,
                  active_agent: str | None = None, agent_hints: dict | None = None,
-                 backup_refs=()) -> str:
+                 backup_refs=(),
+                 consent_manifest: dict | None = None,
+                 consent_events: list | None = None) -> str:
     total = len(outcomes)
     done = sum(1 for o in outcomes if o.state == OutcomeState.DONE)
     low_yield = sum(1 for o in outcomes if o.state in _LOW_YIELD)
@@ -142,6 +167,27 @@ def build_report(outcomes: list, *, run_label: str = "unattended run",
             lines.append(f"> 💡 {len(ids)} ticket(s) requested a different agent — re-run: "
                          f"`ans-run --agent {want} {' '.join(ids)}`")
             lines.append("")
+
+    # Consent provenance (t04): which deny-list action classes a human pre-authorized for this run,
+    # and which actual commands rode that consent — so "the run finished" can never hide "an
+    # irreversible-class action ran under a human-granted exception". Absent when there is nothing
+    # to show (no manifest AND no events) — never an empty header.
+    allowed_slugs = sorted(slug for slug, v in (consent_manifest or {}).items()
+                          if isinstance(v, dict) and v.get("allowed") is True)
+    if allowed_slugs:
+        lines.append("> 🔓 **Pre-authorized this run (deny-list floor lowered for these classes, "
+                     f"all targets):** {', '.join(allowed_slugs)}")
+        lines.append("")
+    if consent_events:
+        lines.append(f"> 🔓 **{len(consent_events)} action(s) ran under consent:**")
+        for ev in consent_events:
+            ts = ev.get("ts_utc", "")
+            slug = ev.get("slug", "")
+            # One event = one report line: a command carrying a newline/CR could otherwise forge
+            # extra report rows, so collapse it to a single line before rendering.
+            cmd = str(ev.get("command", "")).replace("\r", " ").replace("\n", " ")
+            lines.append(f">   - {ts} {slug}: {cmd}")
+        lines.append("")
 
     lines.append(f"**{done}/{total} DONE clean.** "
                  f"{low_yield} need attention (parked / blocked / failed / low-confidence).")
