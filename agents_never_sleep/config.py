@@ -337,6 +337,37 @@ def run_wizard(repo_dir: str, profile) -> dict:
         print("No known agent CLI found in PATH (claude/codex/gemini/copilot) — "
               "detached launches will refuse until launcher.agents is configured.")
 
+    # Pre-authorize deny-list action classes (Part B of the unattended safety model). This is
+    # NOT part of cfg / save_config on purpose: consent lives OUT-OF-REPO (consent_store.py,
+    # keyed off ~/.config, TOFU-style like trust.py) so the unattended agent structurally cannot
+    # author its own consent by editing the in-repo config.
+    from . import enforcement
+    seen_slugs = []
+    reason_for = {}
+    for _, reason, slug in enforcement._IRREVERSIBLE:
+        if slug not in reason_for:
+            seen_slugs.append(slug)
+            reason_for[slug] = reason
+    print("")
+    print("=== Actions ANS may perform unattended (pre-authorize deny-list classes) ===")
+    print("  Consent here lowers the safety floor for the WHOLE run, across EVERY reachable")
+    print("  target of that action class — there is no per-call / per-target check. Only")
+    print("  pre-authorize a high-blast-radius class (especially redis_flush, send_email) for")
+    print("  runs scoped to non-critical environments.")
+    ticked = {}
+    for slug in seen_slugs:
+        allowed = ask(f"  Pre-authorize {slug} ({reason_for[slug]})? (y/n)", "n").lower().startswith("y")
+        if allowed:
+            ticked[slug] = {"allowed": True}
+    if ticked:
+        import getpass
+        try:
+            by = getpass.getuser()
+        except Exception:  # noqa: BLE001 - best-effort attribution only
+            by = "unknown"
+        from . import consent_store
+        consent_store.write(repo_dir, actions=ticked, by=by, backlog_fingerprint=None)
+
     save_config(repo_dir, cfg)
     print(f"Saved config to {config_path(repo_dir)}")
     # The wizard wrote this config in an interactive human session — record TOFU trust so
