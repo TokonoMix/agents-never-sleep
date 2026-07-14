@@ -180,6 +180,38 @@ def test_interactive_records_trust_in_ans_store_not_home():
     assert not any(pathlib.Path(home, ".claude").glob("*trust*"))
 
 
+def test_yes_without_trust_does_not_record_trust():
+    # Security crux: "skip prompts" (--yes) must NOT silently mean "authorize execution" (trust).
+    # A bare --yes (no --trust) must leave the repo untrusted in the ANS trust store.
+    from agents_never_sleep import init_cmd, trust, config
+    repo = tempfile.mkdtemp(); subprocess.run(["git", "init", "-q", repo], check=True)
+    home = tempfile.mkdtemp()
+    old = os.environ.get("HOME"); os.environ["HOME"] = home
+    try:
+        rc = init_cmd.run_init(["--repo", repo, "--yes"])
+        assert rc == 0, rc
+        # Check BEFORE restoring HOME — trust paths resolve HOME at call time.
+        assert not trust.is_trusted(repo, config.config_path(repo)), \
+            "--yes without --trust must NOT record trust (skip-prompts != authorize-execution)"
+    finally:
+        os.environ["HOME"] = old or ""
+
+
+def test_yes_with_trust_records_trust():
+    # The explicit CI one-shot opt-in: --yes --trust DOES record trust, so a detached run can start.
+    from agents_never_sleep import init_cmd, trust, config
+    repo = tempfile.mkdtemp(); subprocess.run(["git", "init", "-q", repo], check=True)
+    home = tempfile.mkdtemp()
+    old = os.environ.get("HOME"); os.environ["HOME"] = home
+    try:
+        rc = init_cmd.run_init(["--repo", repo, "--yes", "--trust"])
+        assert rc == 0, rc
+        assert trust.is_trusted(repo, config.config_path(repo)), \
+            "--yes --trust must record trust for the repo"
+    finally:
+        os.environ["HOME"] = old or ""
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
