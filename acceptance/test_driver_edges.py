@@ -8,6 +8,10 @@ Covers:
   3. CROSS-RESUME RETRY: a FAILED_RETRYABLE ticket set aside in one run is retried on the next run
      (fresh = sentinel absent), and a second identical failure trips loop-detection -> PARKED.
   4. The morning report is written at the terminal signal.
+  5. INT-1675 #2: the cross-platform never-stop cap (enforce.py's `stop-block-count`, defused at
+     _STOP_LOOP_CAP) is reset on ticket PROGRESS, not only on a drained backlog — so 5 blocks
+     spread across a long run cannot silently disable never-stop for the rest of it. The reset
+     already lives in driver._bump_progress; this locks it (the invariant was previously untested).
 
 Uses the in-process StepDriver (state lives on disk, so two drive() passes simulate two resumes).
 Exit 0 = GREEN.
@@ -145,6 +149,34 @@ def main() -> int:
         if driver4b._load_pending() is None:
             failures.append("[no-ticket-source] pending cleared — operator cannot finalize on re-run")
 
+    # --- 5. INT-1675 #2: a completed ticket resets the never-stop stop-block counter ---------
+    # enforce.py caps never-stop at _STOP_LOOP_CAP *blocks*, counted in a `stop-block-count` file
+    # beside the sentinel. If that counter only cleared at DRAINED, 5 stop-blocks spread across a
+    # long backlog would exhaust the cap and silently let a non-Claude run stop with work left.
+    # driver._bump_progress removes the counter on every terminal transition, making the cap
+    # "consecutive blocks WITHOUT progress". Prove it clears on ONE ticket while the backlog (and
+    # thus the sentinel) is still non-empty — i.e. progress-driven, not drain-driven.
+    work5 = tempfile.mkdtemp(prefix="ue-edge-stopreset-")
+    repo5, store5, tickets5, driver5, _ = _build(work5)
+    r5 = driver5.next_ticket()                         # hand out ticket-01 -> writes the sentinel
+    if r5.get("status") != "PROCEED":
+        failures.append(f"[stop-reset] expected first next() PROCEED, got {r5}")
+    else:
+        counter = os.path.join(os.path.dirname(driver5.sentinel_path), "stop-block-count")
+        with open(counter, "w", encoding="utf-8") as fh:
+            fh.write("3")                              # simulate enforce.py having blocked 3 stops
+        by_id5 = {t.id: t for t in tickets5}
+        driver5.complete_ticket(attempted=DemoWorker().apply(by_id5[r5["ticket"]["id"]], repo5))
+        o5 = store5.read(r5["ticket"]["id"])
+        if o5 is None or o5.state != OutcomeState.DONE:
+            failures.append(f"[stop-reset] setup: ticket-01 expected DONE, got {o5 and o5.state}")
+        if os.path.exists(counter):
+            failures.append("[stop-reset] a completed ticket did NOT reset the stop-block counter "
+                            "-> 5 blocks across a long run would silently disable never-stop")
+        if not os.path.exists(driver5.sentinel_path):
+            failures.append("[stop-reset] sentinel vanished after ONE ticket — cannot tell a "
+                            "progress-reset from a drain-reset (02/03 still pending)")
+
     print(f"non-destructive statuses: {statuses}")
     print(f"resume run1: {first} | run2: {second}")
     print("=" * 60)
@@ -153,7 +185,8 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: ✅ GREEN — non-destructive triage, no-pending guard, cross-resume retry all hold")
+    print("RESULT: ✅ GREEN — non-destructive triage, no-pending guard, cross-resume retry, "
+          "stop-counter progress-reset all hold")
     return 0
 
 
