@@ -57,6 +57,19 @@ def test_select_harness_many_yes_prefers_claude():
     assert got == "claude", got
 
 
+def test_select_harness_eoferror_fallback_to_top_ranked():
+    # EOFError on closed/non-TTY stdin: no hang, fall back to highest-maturity candidate.
+    from agents_never_sleep import init_cmd
+    got = init_cmd.select_harness(
+        ["gemini", "claude"],
+        assume_yes=False,
+        ask=lambda *a, **k: (_ for _ in ()).throw(EOFError()),
+        out=lambda *a, **k: None
+    )
+    # claude ranks higher (live-verified first), so EOFError should default to it.
+    assert got == "claude", got
+
+
 def test_maturity_lines_flags_unverified():
     # Assert on the EXACT suffix, not a substring both branches satisfy ("NOT live-verified"
     # contains "live-verified"). Pass the agent-CLI name — the capabilities key.
