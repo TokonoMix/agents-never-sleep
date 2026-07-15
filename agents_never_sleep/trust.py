@@ -6,8 +6,10 @@ permission system boots. A cloned third-party repo must therefore not get silent
 code execution. Model: trust-on-first-use, like direnv `allow` / ssh known_hosts —
 
   * trust is recorded PER USER in ~/.config/agents-never-sleep/trusted.json as
-    {repo realpath: sha256 of the config bytes},
-  * any config change invalidates trust (hash mismatch == untrusted),
+    {repo realpath: sha256 of a canonical JSON normalization of the config — see
+    `config_digest` for why raw bytes are not hashed directly},
+  * any SEMANTIC config change invalidates trust (hash mismatch == untrusted); a purely
+    cosmetic re-save (whitespace, key order) does not,
   * headless + untrusted == NO-GO; only an interactive human (tty) or an explicit
     `ans-run --trust` records trust,
   * a repo WITHOUT a config file needs no trust: only built-in defaults run.
@@ -40,16 +42,43 @@ def _store_path() -> str:
 
 
 def config_digest(config_path: str, *, data: bytes | None = None) -> str | None:
-    """sha256 of the config bytes; None when the file does not exist. Pass `data` to hash
-    the exact buffer that was read for parsing (avoids a TOCTOU second read of a
-    repo-writable path — the trusted bytes are then the executed bytes)."""
+    """sha256 of a CANONICAL JSON normalization of the config; None when the file does not
+    exist. Pass `data` to canonicalize the exact buffer that was read for parsing (avoids a
+    TOCTOU second read of a repo-writable path — the trusted bytes are then the executed
+    bytes).
+
+    Scope (consensus T4, deliberately conservative): the config is parsed and re-serialized
+    as `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` (UTF-8)
+    before hashing, instead of hashing raw bytes. This kills COSMETIC re-trust churn —
+    whitespace, indentation, key reordering from a re-save — while weakening nothing: every
+    key and value (commands, autonomy flags, gate names, agent presets, anything) is still
+    part of the canonical form, so any semantic change still yields a different digest.
+
+    Full field-level narrowing (hashing only a curated set of "security-relevant" fields via
+    a TRUST_FIELDS allowlist) is deliberately DEFERRED, not built here — the consensus
+    flagged it as a maintenance-drift footgun: a future field could silently default OUT of
+    an allowlist and stop being covered by trust. If that is ever pursued, it MUST use a
+    named, versioned DENY-list of ignorable fields (new fields default IN-scope/hashed) —
+    never an allow-list where new fields default out.
+
+    On invalid JSON / a parse error this falls back to the raw-bytes sha256 (same as the
+    pre-canonicalization behavior) — an unparseable config still gets a deterministic digest
+    and config_digest never raises."""
     if data is not None:
-        return hashlib.sha256(data).hexdigest()
+        raw = data
+    else:
+        try:
+            with open(config_path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            return None
     try:
-        with open(config_path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
-    except OSError:
-        return None
+        obj = json.loads(raw.decode("utf-8"))
+        canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False).encode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        canonical = raw  # fallback: hash the raw bytes, never crash on unparseable input
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _load_store() -> dict:

@@ -406,8 +406,9 @@ def reactivate_pending_onboard(repo_dir: str, existing: dict) -> bool:
     """Re-activation (keyless onboard completed between runs): a durable pending_onboard marker
     means "the newcomer chose Create; enable review as soon as the key exists". Silent (no
     prompt) so it is safe in unattended runs too. Any flip re-records TOFU trust — trust.py
-    keys on the sha256 of the config bytes, so a silent flip would otherwise bounce the next
-    detached run as untrusted. Mutates `existing` and persists it; returns whether it flipped.
+    keys on the sha256 of a canonical JSON form of the config, so a silent flip would
+    otherwise bounce the next detached run as untrusted. Mutates `existing` and persists it;
+    returns whether it flipped.
     Callers that must stay side-effect-free (e.g. a read-only report) should not call this."""
     tok = (existing.get("integrations") or {}).get("tokonomix") or {}
     if not tok.get("pending_onboard"):
