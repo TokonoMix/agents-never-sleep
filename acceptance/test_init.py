@@ -230,6 +230,63 @@ def test_demo_tickets_are_inert():
     assert titles == ["real"], titles  # exactly the real ticket; zero examples leaked in
 
 
+def test_install_hooks_writes_no_host_config():
+    from agents_never_sleep import init_cmd
+    home = tempfile.mkdtemp()
+    guarded = {".claude/settings.json": "{}", ".gemini/settings.json": "{}", ".codex/hooks.json": "{}"}
+    before = {}
+    for rel, body in guarded.items():
+        p = pathlib.Path(home, rel); p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body); before[rel] = p.read_bytes()
+    old = os.environ.get("HOME"); os.environ["HOME"] = home
+    try:
+        # both the targeted and the no-harness (all-targets) paths must write nothing
+        assert init_cmd.run_install_hooks(["--harness", "claude"]) == 0
+        assert init_cmd.run_install_hooks([]) == 0
+    finally:
+        os.environ["HOME"] = old or ""
+    for rel, prior in before.items():
+        assert pathlib.Path(home, rel).read_bytes() == prior, f"install-hooks MUST NOT write ~/{rel}"
+
+
+def test_install_hooks_rejects_unknown_harness():
+    from agents_never_sleep import init_cmd
+    assert init_cmd.run_install_hooks(["--harness", "nope"]) != 0
+
+
+def test_install_hooks_accepts_cursor_target_not_in_allowlist():
+    # cursor is a valid install-hooks target (enforcement-only platform) even though it is NOT in
+    # agent_clis.ALLOWLIST — ANS enforces on more platforms than it launches.
+    from agents_never_sleep import init_cmd, agent_clis
+    assert "cursor" not in agent_clis.ALLOWLIST
+    assert init_cmd.run_install_hooks(["--harness", "cursor"]) == 0
+
+
+def test_handoff_states_blast_radius():
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        init_cmd.print_enforcement_handoff("claude", "/tmp/x")   # harness-name key
+    out = buf.getvalue().lower()
+    assert "install-hooks" in out and "global" in out
+
+
+def test_handoff_generic_when_no_harness():
+    # No fabricated harness identity: harness=None must produce a generic handoff — no Claude-specific
+    # target path or blast-radius claim (mentioning "claude" as one of several enumerated choices is
+    # fine; asserting its GLOBAL settings path/blast-radius as if it were selected is not).
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        init_cmd.print_enforcement_handoff(None, "/tmp/x")
+    out = buf.getvalue().lower()
+    assert "~/.claude/settings.json" not in out
+    assert "blast radius" not in out
+    assert "install-hooks" in out
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):

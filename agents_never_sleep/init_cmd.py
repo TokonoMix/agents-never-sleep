@@ -104,8 +104,33 @@ def write_demo_tickets(repo: str, cfg: dict) -> list[str]:
     return paths
 
 
+# Keyed on the agent-CLI / harness name (same convention as capabilities + agent_clis), NOT the
+# "claude-code" display label. NOTE: `cursor` (and other enforcement-only platforms) are valid
+# install-hooks TARGETS even though they are NOT in agent_clis.ALLOWLIST — ANS enforces on more
+# platforms (hooks/platforms/) than it launches. So `init` never selects cursor (its harness comes
+# from ALLOWLIST), but `install-hooks --harness cursor` is legitimate.
+_BLAST_RADIUS = {
+    "claude": ("~/.claude/settings.json", "GLOBAL — affects every Claude Code session"),
+    "gemini": ("~/.gemini/settings.json", "GLOBAL — affects every Gemini CLI session"),
+    "codex": ("~/.codex/hooks.json", "GLOBAL — affects every Codex CLI session"),
+    "copilot": (".github/hooks/ (in this repo)", "PROJECT-LOCAL"),
+    "cursor": (".cursor/hooks.json (in this repo)", "PROJECT-LOCAL"),
+}
+
+
 def print_enforcement_handoff(harness, repo: str) -> None:
-    pass  # implemented in Task 5
+    print("")
+    print("Enforcement (never-ASK / deny-irreversible / never-stop) is NOT wired by init.")
+    if harness and harness in _BLAST_RADIUS:
+        target, radius = _BLAST_RADIUS[harness]
+        print(f"  Target for {harness}: {target}")
+        print(f"  Blast radius: {radius}")
+        print(f"  Wire it as a deliberate, reversible step:  ans-run install-hooks --harness {harness}")
+    else:
+        # No harness selected (none installed): stay generic — never name a Claude path we can't justify.
+        print("  No agent CLI selected — once you install one, wire enforcement with:")
+        print("    ans-run install-hooks --harness <claude|codex|gemini|copilot>")
+    print("  (init never touches host/global config — this is on purpose.)")
 
 
 def run_init(argv: list[str]) -> int:
@@ -186,4 +211,20 @@ def run_init(argv: list[str]) -> int:
 
 
 def run_install_hooks(argv: list[str]) -> int:
-    raise NotImplementedError  # implemented in Task 5
+    p = argparse.ArgumentParser(prog="ans-run install-hooks", add_help=True)
+    p.add_argument("--harness", default=None, help="claude|codex|gemini|copilot|cursor")
+    a = p.parse_args(argv)
+    if a.harness and a.harness not in _BLAST_RADIUS:
+        print(f"install-hooks: unknown harness {a.harness!r}; known: {', '.join(_BLAST_RADIUS)}")
+        return EX_ERR
+    # Do NOT default to claude — printing the wrong global path is exactly the footgun this feature
+    # exists to prevent. With no --harness, show every target so the user chooses knowingly.
+    targets = {a.harness: _BLAST_RADIUS[a.harness]} if a.harness in _BLAST_RADIUS else _BLAST_RADIUS
+    print("install-hooks — guided install (diff + confirm) is pending the UX review.")
+    if not a.harness:
+        print("No --harness given; showing all targets so you pick knowingly:")
+    for name, (target, radius) in targets.items():
+        print(f"  {name}: {target}  ({radius})")
+    print("For now follow the manual steps in hooks/README.md (Claude) or hooks/platforms/README.md")
+    print("(other harnesses). Nothing was written.")
+    return EX_OK
