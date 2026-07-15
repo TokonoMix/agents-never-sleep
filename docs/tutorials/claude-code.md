@@ -66,12 +66,13 @@ two decisions worth attention:
   requires; an unconfirmed preset refuses to launch detached (a deliberate NO-GO instead of a
   silent stall).
 
-**Pre-authorize deny-list classes (optional).** The wizard then asks, once per deny-list class,
-whether to pre-authorize it for this run (default no). Consent applies to the WHOLE run across
-every reachable target of that class — there's no per-call check — so only say yes for a
-high-blast-radius class (`redis_flush`, `send_email`, …) on a run confined to a non-critical
-environment. Consent is stored out-of-repo and frozen into the run; see
-[glossary](../glossary.md#security).
+**Pre-authorize deny-list classes (optional).** The wizard — and `ans-run init` when run
+interactively — then asks, once per deny-list class, whether to pre-authorize it for this run
+(default no). Consent applies to the WHOLE run across every reachable target of that class — there's
+no per-call check — so only say yes for a high-blast-radius class (`redis_flush`, `send_email`, …) on
+a run confined to a non-critical environment. Note `send_email` in particular is a prompt-injection
+exfiltration surface with no per-run gate once pre-authorized. Consent is stored out-of-repo and
+frozen into the run; see [glossary](../glossary.md#security).
 
 ## 3. Trust the config (TOFU)
 

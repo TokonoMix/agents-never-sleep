@@ -255,8 +255,8 @@ one sanctioned way to widen it.
 
 **Consent manifest** — A human's run-setup pre-authorization of specific deny-list classes (e.g.
 `redis_flush`), recorded **out-of-repo** (`~/.config/agents-never-sleep/consent/`, TOFU-style — the
-unattended agent cannot author its own consent) via the interactive wizard's "Actions ANS may perform
-unattended" step. Frozen into the agent process as `UE_CONSENT` at launch; upgrades PARK→ALLOW only for a
+unattended agent cannot author its own consent) via the interactive wizard's — or `ans-run init`'s —
+"Actions ANS may perform unattended" step. Frozen into the agent process as `UE_CONSENT` at launch; upgrades PARK→ALLOW only for a
 single clean shell statement matching exactly one consented class. Coarse (per-class / once / at-setup /
 whole-run / all-targets) — target-scoping is a deferred v2 item. Every consent-upgraded command is logged
 to an out-of-repo audit trail and surfaced in the morning report.
