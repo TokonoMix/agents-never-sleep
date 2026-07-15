@@ -277,6 +277,81 @@ def test_permission_marker_table_matches_cmd_variants(failures):
         failures.append("[marker] unknown/custom CLI should be None (cannot judge)")
 
 
+def _isolated_home() -> str:
+    return tempfile.mkdtemp(prefix="ue-launcher-home-")
+
+
+def test_enforcement_hooks_note_when_unwired_but_still_go(failures):
+    # Task B (consensus T1): the preflight issued a GO without ever checking whether the ANS
+    # deny-hooks are wired into the resolved harness's host config. unwired hooks must get a
+    # NON-BLOCKING NOTE naming the remedy — and the run must still GO. A gate here would be
+    # exactly the friction the trusted-operator design avoids.
+    repo, penv = _fake_claude_repo(["claude", "-p", "--dangerously-skip-permissions"])
+    env = dict(penv)
+    env["HOME"] = _isolated_home()  # empty HOME -> no ~/.claude/settings.json -> unwired
+    res = _run(repo, "--check", env_extra=env)
+    if res.returncode != 0:
+        failures.append(f"[hooks-note-unwired] unwired hooks must still be GO: "
+                        f"{res.returncode}: {res.stdout}")
+    if "install-hooks --harness claude" not in res.stdout:
+        failures.append(f"[hooks-note-unwired] missing remedy-naming NOTE: {res.stdout}")
+
+
+def test_enforcement_hooks_no_note_when_wired(failures):
+    repo, penv = _fake_claude_repo(["claude", "-p", "--dangerously-skip-permissions"])
+    env = dict(penv)
+    env["HOME"] = _isolated_home()
+    full_env = dict(os.environ)
+    full_env.update(env)
+    wire = subprocess.run([sys.executable, ANS_RUN, "install-hooks", "--harness", "claude",
+                           "--yes"], capture_output=True, text=True, timeout=30, env=full_env)
+    if wire.returncode != 0:
+        failures.append(f"[hooks-note-wired] install-hooks setup failed: "
+                        f"{wire.returncode}: {wire.stdout}{wire.stderr}")
+        return
+    res = _run(repo, "--check", env_extra=env)
+    if res.returncode != 0:
+        failures.append(f"[hooks-note-wired] wired hooks should still be GO: "
+                        f"{res.returncode}: {res.stdout}")
+    if "install-hooks --harness claude" in res.stdout:
+        failures.append(f"[hooks-note-wired] wired hooks must NOT emit the remedy NOTE: "
+                        f"{res.stdout}")
+
+
+def test_enforcement_hooks_note_when_referenced_script_missing(failures):
+    # Moved/deleted install: the settings file still references the ANS hook markers, but the
+    # script path no longer exists on disk -> the strengthened detector must treat this as NOT
+    # wired (dead enforcement), and the preflight must still NOTE it (still GO).
+    repo, penv = _fake_claude_repo(["claude", "-p", "--dangerously-skip-permissions"])
+    home = _isolated_home()
+    env = dict(penv)
+    env["HOME"] = home
+    settings_dir = os.path.join(home, ".claude")
+    os.makedirs(settings_dir, exist_ok=True)
+    missing = os.path.join(home, "moved-away", "agents-never-sleep", "hooks")
+    data = {
+        "hooks": {
+            "Stop": [{"hooks": [{"type": "command",
+                                  "command": os.path.join(missing, "stop_guard.sh")}]}],
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command",
+                                                "command": os.path.join(missing, "deny_irreversible.sh")}]},
+                {"matcher": "AskUserQuestion", "hooks": [{"type": "command",
+                                                           "command": os.path.join(missing, "deny_ask.sh")}]},
+            ],
+        }
+    }
+    with open(os.path.join(settings_dir, "settings.json"), "w") as fh:
+        json.dump(data, fh)
+    res = _run(repo, "--check", env_extra=env)
+    if res.returncode != 0:
+        failures.append(f"[hooks-note-missing-script] must still be GO: "
+                        f"{res.returncode}: {res.stdout}")
+    if "install-hooks --harness claude" not in res.stdout:
+        failures.append(f"[hooks-note-missing-script] missing remedy-naming NOTE "
+                        f"(moved/deleted install must count as unwired): {res.stdout}")
+
+
 def test_capability_restriction_appends_declared_tokens(failures):
     # Ticket 05-B: a preset's opt-in `capabilities` list is appended to the agent argv (restricts
     # the loaded MCP/tool set); absent = full set (no-op); a malformed value is a NO-GO.
@@ -730,6 +805,9 @@ def main() -> int:
     test_known_cli_capability_probe(failures)
     test_detached_interactive_permission_mode_is_nogo(failures)
     test_permission_marker_table_matches_cmd_variants(failures)
+    test_enforcement_hooks_note_when_unwired_but_still_go(failures)
+    test_enforcement_hooks_no_note_when_wired(failures)
+    test_enforcement_hooks_note_when_referenced_script_missing(failures)
     test_default_watchdog_surfaces_instant_crash(failures)
     test_capability_restriction_appends_declared_tokens(failures)
     test_repo_shipped_binary_rejected(failures)

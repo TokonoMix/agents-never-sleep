@@ -427,6 +427,28 @@ def resolve_agent(cfg: dict, config_exists: bool, agent_flag: str, rep: Report) 
     return [], {}, ""
 
 
+def check_enforcement_hooks_wired(agent_argv: list, rep: Report) -> None:
+    """Non-blocking preflight NOTE (consensus T1): `ans-run init` -> skip `install-hooks` ->
+    a detached run starts with the ANS deny-hooks NOT wired into the resolved harness's host
+    config, and nothing surfaces this today (the morning-report blind_spot machinery does not
+    cover it). This is deliberately a NOTE, never a NO-GO — the trusted-operator model rules
+    out blocking on it; the operator just needs the state named, with the remedy. Reuses
+    init_cmd.hooks_wired, which also treats a referenced-but-missing hook script (moved/deleted
+    install) as unwired. No harness resolved (empty/custom argv) -> generic note, never a
+    fabricated harness identity."""
+    if not agent_argv:
+        return  # resolve_agent already recorded the NO-GO for this
+    cli = cli_for_argv(agent_argv)
+    if not cli:
+        rep.note("no recognized agent CLI resolved — cannot verify enforcement hooks are "
+                 "wired; this run proceeds on the prose-contract only")
+        return
+    if init_cmd.hooks_wired(cli):
+        return
+    rep.note(f"enforcement hooks not detected for '{cli}' — run `ans-run install-hooks "
+             f"--harness {cli}` to wire them; this run proceeds on the prose-contract only")
+
+
 def check_detached_permission_mode(agent_argv, foreground: bool, rep: Report) -> None:
     """A detached run has stdin closed (Popen stdin=DEVNULL / no --fg). If the agent CLI's
     OWN permission system is still interactive, the first tool-approval prompt HANGS the run
@@ -970,6 +992,8 @@ def main() -> int:
     # A detached launch (no --fg) with an interactively-gated agent hangs on the first tool
     # prompt — inspect the resolved argv, not just the autonomy_confirmed boolean.
     check_detached_permission_mode(agent_argv, args.fg, rep)
+    # Non-blocking: is enforcement actually wired for the resolved harness? (Task B, consensus T1)
+    check_enforcement_hooks_wired(agent_argv, rep)
     # Token-ref resolution (F4) happens HERE — before the capability probe — so the probe
     # and the spawn see the identical resolved environment.
     agent_env = resolve_preset_env(agent_env, full_config, rep)

@@ -58,6 +58,33 @@ def test_hooks_wired_false_on_unrelated_settings():
     _with_home(run)
 
 
+def test_hooks_wired_false_when_referenced_script_missing():
+    # Moved/deleted install (Task B): the settings file names every ANS hook marker, but the
+    # script path it points at no longer exists on disk. This must count as NOT wired — a
+    # settings file surviving an install move/delete is dead enforcement, not live enforcement.
+    from agents_never_sleep import init_cmd
+
+    def run(home):
+        p = pathlib.Path(home, ".claude", "settings.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        missing = os.path.join(home, "moved-away", "agents-never-sleep", "hooks")
+        data = {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command",
+                                      "command": os.path.join(missing, "stop_guard.sh")}]}],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command",
+                                                    "command": os.path.join(missing, "deny_irreversible.sh")}]},
+                    {"matcher": "AskUserQuestion", "hooks": [{"type": "command",
+                                                               "command": os.path.join(missing, "deny_ask.sh")}]},
+                ],
+            }
+        }
+        p.write_text(json.dumps(data))
+        assert init_cmd.hooks_wired("claude", home=home) is False
+    _with_home(run)
+
+
 def test_install_hooks_yes_writes_and_hooks_wired_true_after():
     from agents_never_sleep import init_cmd
 

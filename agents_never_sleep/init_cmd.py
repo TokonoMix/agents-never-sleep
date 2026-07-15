@@ -193,11 +193,21 @@ def _all_hook_commands(hooks_obj) -> list[str]:
     return cmds
 
 
+def _hook_script_exists(cmd: str) -> bool:
+    """The first whitespace-separated token of a hook `command` string is the script path
+    (some platforms append CLI args after it, e.g. 'enforce.sh gemini pre_tool'). True iff
+    that script still exists on disk — a settings file can keep naming a script from a
+    moved/deleted ANS install, which is dead enforcement even though the reference is intact."""
+    token = cmd.strip().split(" ", 1)[0] if cmd.strip() else ""
+    return bool(token) and os.path.isfile(token)
+
+
 def hooks_wired(harness: str, *, home: str | None = None) -> bool:
-    """True iff the ANS deny-hooks are already referenced in `harness`'s host settings file.
-    Best-effort: robust to a missing file, malformed JSON, or an unrelated settings file (all
-    → False). Solid for claude/gemini/codex (fixed HOME-relative settings path); copilot/cursor
-    are project-local with no --repo to resolve against here, so they always report False —
+    """True iff the ANS deny-hooks are already referenced in `harness`'s host settings file
+    AND the referenced script still exists on disk. Best-effort: robust to a missing file,
+    malformed JSON, an unrelated settings file, or a moved/deleted install (all → False).
+    Solid for claude/gemini/codex (fixed HOME-relative settings path); copilot/cursor are
+    project-local with no --repo to resolve against here, so they always report False —
     install-hooks hands those off rather than guessing a repo (see run_install_hooks)."""
     info = _HOME_HARNESS_SETTINGS.get(harness)
     if info is None:
@@ -210,7 +220,11 @@ def hooks_wired(harness: str, *, home: str | None = None) -> bool:
     if not isinstance(hooks_obj, dict):
         return False
     commands = _all_hook_commands(hooks_obj)
-    return all(any(marker in cmd for cmd in commands) for marker in info["markers"])
+    for marker in info["markers"]:
+        matched = next((cmd for cmd in commands if marker in cmd), None)
+        if matched is None or not _hook_script_exists(matched):
+            return False
+    return True
 
 
 def _load_snippet(harness: str) -> dict:
