@@ -257,3 +257,64 @@ explicit design instruction — not a deviation from "canonical and unchanged."
   wheel-fallback enforcement path resolves its interpreter, not a defect introduced by this
   change, and is out of this task's explicit scope (packaging + resolver + exec-bit only) — flagged
   here so it doesn't get mistaken for "enforcement is guaranteed once install-hooks succeeds."
+
+---
+
+# Follow-up — visible warning for the silent fail-open enforcement gap
+
+Status: **DONE**
+
+Worktree: `/var/www/projects/iipnprojects/agents-never-sleep-wt-wheelhooks`
+Branch: `feat/package-hooks-in-wheel`
+
+## Why
+
+The previous entry in this report flagged (non-blocking) that enforcement depends on which
+`python3` Claude Code spawns the hook with, not just on `install-hooks` writing correct paths:
+`deny_irreversible.sh` runs `python3 -m agents_never_sleep.enforce ... || true`, so if that
+`python3` can't `import agents_never_sleep` (wheel install, wrong venv on PATH), the import fails,
+`|| true` swallows it, and the hook silently ALLOWS a dangerous command — no error surfaced
+anywhere. A code review flagged this as a SILENT FAIL-OPEN that must not ship invisible for a
+safety tool.
+
+## Fix
+
+`agents_never_sleep/init_cmd.py`:
+- Added `_enforcement_python_can_import()` — runs a fresh `python3 -c "import agents_never_sleep"`
+  subprocess (deliberately NOT `sys.executable`, which would always pass since install-hooks
+  itself runs from an environment that has the package — that would mask exactly the gap this
+  checks for) and returns whether it succeeded. Best-effort: any failure to even run `python3`
+  (not found, timeout) also counts as "can't import".
+- `run_install_hooks()`: after a successful wire (settings written, `hooks_wired()` verified
+  True), calls the check and prints either a positive confirmation
+  ("enforcement will run") or a `WARNING: enforcement may FAIL OPEN ...` message explaining the
+  mechanism and the fix (run ans-run/the harness from the same env/venv where
+  agents-never-sleep is installed, or use the source-checkout install). This is a visible warning
+  only — exit code stays `EX_OK`; wiring itself did succeed, so this is not a NO-GO.
+
+Did NOT touch the hook scripts (`enforce.sh` etc.) — a robust cross-layout interpreter fix is
+separate design work, explicitly out of scope; this only makes the gap visible at wire time.
+
+## Tests added (`acceptance/test_install_hooks.py`)
+
+- `test_install_hooks_warns_when_enforcement_python_cannot_import` — monkeypatches
+  `init_cmd._enforcement_python_can_import` to `False`, asserts `rc == 0` (wiring still
+  succeeded), `hooks_wired()` still `True`, and the WARNING/"FAIL OPEN" text is printed.
+- `test_install_hooks_confirms_when_enforcement_python_can_import` — monkeypatches it to `True`,
+  asserts no WARNING and the positive "enforcement will run" confirmation is printed.
+- `test_enforcement_python_can_import_reflects_real_python3` — sanity on the real (unmocked)
+  helper: in this dev environment `python3` on PATH can import the package (editable-installed),
+  so it must report `True` — proves the subprocess probe isn't a stub that's always False.
+
+## Gate output
+
+`python3 acceptance/test_install_hooks.py` → 22/22 `ok`, exit 0 (includes the 3 new tests above).
+
+`bash acceptance/run_all.sh` → `ALL ACCEPTANCE SUITES GREEN`, exit 0.
+
+## Concerns / follow-ups (none blocking)
+
+- The check only runs at `install-hooks` wire time, not at every hook invocation — it can go stale
+  if the operator later removes/breaks the package in the `python3` environment it found. That's
+  inherent to a wire-time check and was the explicit scope here (make the gap visible, not
+  eliminate it — the robust fix is a separate cross-layout interpreter design task).

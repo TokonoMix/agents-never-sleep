@@ -263,6 +263,24 @@ def _hook_script_exists(cmd: str) -> bool:
     return os.path.isfile(tokens[idx])
 
 
+def _enforcement_python_can_import() -> bool:
+    """True iff `python3` on PATH can `import agents_never_sleep` — the interpreter the wired
+    hook scripts actually invoke at enforcement time (`python3 -m agents_never_sleep.enforce ...
+    || true`). This is deliberately checked with a FRESH `python3` subprocess rather than trusting
+    `sys.executable`/the running interpreter: install-hooks itself always runs from an environment
+    that has the package (that's how it got invoked), so checking `sys.executable` would always
+    pass and mask the exact gap this exists to catch — a wheel install where Claude Code spawns
+    the hook with a *different* python3 than the one this package was installed into, so the
+    import fails, `|| true` swallows it, and enforcement silently fails open. Best-effort: any
+    failure to even run `python3` (not found, times out) also counts as "can't import"."""
+    try:
+        r = subprocess.run(["python3", "-c", "import agents_never_sleep"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
 def hooks_wired(harness: str, *, home: str | None = None) -> bool:
     """True iff the ANS deny-hooks are already referenced in `harness`'s host settings file
     AND the referenced script still exists on disk. Best-effort: robust to a missing file,
@@ -574,4 +592,15 @@ def run_install_hooks(argv: list[str], *, ask=input, out=print) -> int:
             f"something's off; please inspect {path} by hand.")
         return EX_ERR
     out(f"✓ enforcement hooks wired for {harness}")
+    if _enforcement_python_can_import():
+        out("✓ enforcement check: this system's `python3` can import agents_never_sleep — "
+            "enforcement will run.")
+    else:
+        out("WARNING: enforcement may FAIL OPEN — the `python3` on PATH here cannot "
+            "`import agents_never_sleep`. The wired hooks run `python3 -m "
+            "agents_never_sleep.enforce ... || true`; if the harness invokes that hook with a "
+            "python3 that can't see this package, the import fails, `|| true` swallows it, and "
+            "dangerous commands are ALLOWED with no error. Run ans-run (and the harness it "
+            "launches) from the same environment/venv where agents-never-sleep is installed, or "
+            "use the source-checkout install, to close this gap.")
     return EX_OK

@@ -351,6 +351,62 @@ def test_hook_script_exists_handles_bash_prefixed_command():
         os.unlink(path)
 
 
+def test_install_hooks_warns_when_enforcement_python_cannot_import():
+    # Silent-fail-open guard: if the `python3` on PATH at hook-invocation time can't
+    # `import agents_never_sleep` (e.g. a wheel install where Claude Code spawns the hook with a
+    # different interpreter than the venv that has the package), enforce.py ModuleNotFounds, the
+    # hook script's `|| true` swallows it, and the hook silently ALLOWS instead of denying. Wiring
+    # itself still succeeded (rc==0, settings written) — this is a visible WARNING, not a NO-GO.
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+
+    def run(home):
+        old = init_cmd._enforcement_python_can_import
+        init_cmd._enforcement_python_can_import = lambda: False
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            out = buf.getvalue()
+        finally:
+            init_cmd._enforcement_python_can_import = old
+        assert rc == 0, rc  # wiring succeeded; the import gap is a warning, not an error
+        assert init_cmd.hooks_wired("claude", home=home) is True
+        assert "WARNING" in out, out
+        assert "FAIL OPEN" in out, out
+        assert "agents_never_sleep" in out, out
+    _with_home(run)
+
+
+def test_install_hooks_confirms_when_enforcement_python_can_import():
+    # Success path: when the check passes, print a positive confirmation instead of a warning.
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+
+    def run(home):
+        old = init_cmd._enforcement_python_can_import
+        init_cmd._enforcement_python_can_import = lambda: True
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            out = buf.getvalue()
+        finally:
+            init_cmd._enforcement_python_can_import = old
+        assert rc == 0, rc
+        assert "WARNING" not in out, out
+        assert "enforcement will run" in out, out
+    _with_home(run)
+
+
+def test_enforcement_python_can_import_reflects_real_python3():
+    # Sanity on the real (unmocked) helper: in THIS test environment python3 on PATH can import
+    # the package (it's how these tests themselves run), so the check must report True — proves
+    # the subprocess probe isn't just always-False.
+    from agents_never_sleep import init_cmd
+    assert init_cmd._enforcement_python_can_import() is True
+
+
 def test_real_home_settings_untouched_by_this_suite():
     # Snapshot the OPERATOR's real ~/.claude/settings.json (if present) using the real HOME,
     # captured before any test in this module could have overridden it, then verify at the end
