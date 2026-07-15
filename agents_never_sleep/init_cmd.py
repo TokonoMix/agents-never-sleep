@@ -7,8 +7,13 @@ only inside <repo>; it never touches host/global config (~/.claude/settings.json
 from __future__ import annotations
 
 import argparse
+import copy
+import difflib
+import json
 import os
 import subprocess
+import sys
+import tempfile
 
 from . import agent_clis, capabilities, config, preflight, trust
 
@@ -117,6 +122,173 @@ _BLAST_RADIUS = {
     "cursor": (".cursor/hooks.json (in this repo)", "PROJECT-LOCAL"),
 }
 
+# This install's own root (parent of hooks/), resolved via realpath so a symlinked skill
+# install (e.g. ~/.claude/skills/agents-never-sleep -> this checkout) still resolves to the
+# real absolute path — the same path substituted into the hook snippets below.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+# Harnesses `install-hooks` can actually MERGE into: a single host settings JSON file at a
+# fixed, HOME-relative path, using the nested `hooks: {Event: [{matcher?, hooks:[...]}]}` shape.
+# copilot/cursor are project-local (repo-relative, different write model — a drop-in file for
+# copilot, a flatter schema for cursor) and this command has no --repo flag, so they are valid
+# `--harness` TARGETS (never rejected) but are handed off rather than auto-written (see
+# run_install_hooks). Keep this table the single place write-target and detect-target are
+# defined, so `hooks_wired` and the writer can never diverge.
+_HOME_HARNESS_SETTINGS = {
+    "claude": {
+        "rel_path": ("claude", "settings.json"),
+        "snippet_rel": ("hooks", "settings-snippet.json"),
+        "placeholder": "/ABSOLUTE/PATH/TO/agents-never-sleep/",
+        "markers": ("stop_guard.sh", "deny_irreversible.sh", "deny_ask.sh"),
+    },
+    "gemini": {
+        "rel_path": ("gemini", "settings.json"),
+        "snippet_rel": ("hooks", "platforms", "gemini", "settings.json"),
+        "placeholder": "<SKILL_DIR>",
+        "markers": ("enforce.sh gemini pre_tool", "enforce.sh gemini stop"),
+    },
+    "codex": {
+        "rel_path": ("codex", "hooks.json"),
+        "snippet_rel": ("hooks", "platforms", "codex", "hooks.json"),
+        "placeholder": "<SKILL_DIR>",
+        "markers": ("enforce.sh codex pre_tool", "enforce.sh codex stop"),
+    },
+}
+
+
+def _settings_path(harness: str, *, home: str | None = None) -> str | None:
+    """Absolute path to `harness`'s host settings file, or None for a harness install-hooks
+    doesn't (yet) merge into. The single source of truth for both the writer and hooks_wired."""
+    info = _HOME_HARNESS_SETTINGS.get(harness)
+    if info is None:
+        return None
+    home = home if home is not None else os.path.expanduser("~")
+    return os.path.join(home, "." + harness, *info["rel_path"][1:])
+
+
+def _read_json(path: str):
+    """Parsed JSON dict, or None on a missing file / malformed JSON — never raises."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _all_hook_commands(hooks_obj) -> list[str]:
+    """Every `command` string anywhere under a settings file's `hooks` subtree."""
+    cmds: list[str] = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            cmd = o.get("command")
+            if isinstance(cmd, str):
+                cmds.append(cmd)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(hooks_obj)
+    return cmds
+
+
+def hooks_wired(harness: str, *, home: str | None = None) -> bool:
+    """True iff the ANS deny-hooks are already referenced in `harness`'s host settings file.
+    Best-effort: robust to a missing file, malformed JSON, or an unrelated settings file (all
+    → False). Solid for claude/gemini/codex (fixed HOME-relative settings path); copilot/cursor
+    are project-local with no --repo to resolve against here, so they always report False —
+    install-hooks hands those off rather than guessing a repo (see run_install_hooks)."""
+    info = _HOME_HARNESS_SETTINGS.get(harness)
+    if info is None:
+        return False
+    path = _settings_path(harness, home=home)
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return False
+    hooks_obj = data.get("hooks")
+    if not isinstance(hooks_obj, dict):
+        return False
+    commands = _all_hook_commands(hooks_obj)
+    return all(any(marker in cmd for cmd in commands) for marker in info["markers"])
+
+
+def _load_snippet(harness: str) -> dict:
+    """The harness's hook snippet with its placeholder replaced by this install's real
+    absolute path (resolved from the package location, never a guessed/relative path)."""
+    info = _HOME_HARNESS_SETTINGS[harness]
+    snippet_path = os.path.join(_PACKAGE_ROOT, *info["snippet_rel"])
+    with open(snippet_path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    placeholder = info["placeholder"]
+    replacement = (_PACKAGE_ROOT + "/") if placeholder.endswith("/") else _PACKAGE_ROOT
+    return json.loads(text.replace(placeholder, replacement))
+
+
+def _merge_hook_group(existing_groups: list, snippet_group: dict) -> None:
+    """Merge one snippet hook-group (e.g. {"matcher": "Bash", "hooks": [...]}) into the host's
+    existing group list for that event, in place. Groups are matched by `matcher` (None for
+    matcher-less events like Stop). Idempotent: a command already present (exact string match —
+    stable for a given install) is never duplicated. Never touches unrelated groups/matchers."""
+    matcher = snippet_group.get("matcher")
+    target = None
+    for g in existing_groups:
+        if isinstance(g, dict) and g.get("matcher") == matcher:
+            target = g
+            break
+    if target is None:
+        existing_groups.append(copy.deepcopy(snippet_group))
+        return
+    target_hooks = target.setdefault("hooks", [])
+    existing_cmds = {h.get("command") for h in target_hooks if isinstance(h, dict)}
+    for h in snippet_group.get("hooks", []):
+        if h.get("command") not in existing_cmds:
+            target_hooks.append(copy.deepcopy(h))
+            existing_cmds.add(h.get("command"))
+
+
+def _merge_settings(existing: dict, snippet: dict) -> dict:
+    """Merge `snippet`'s hooks into a deep copy of `existing`. Touches ONLY the `hooks` key —
+    `permissions` and every other top-level key survive byte-for-byte, as does any pre-existing
+    hook whose matcher/event the snippet doesn't touch."""
+    merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    merged_hooks = merged.get("hooks")
+    if not isinstance(merged_hooks, dict):
+        merged_hooks = {}
+        merged["hooks"] = merged_hooks
+    for event, groups in snippet.get("hooks", {}).items():
+        existing_groups = merged_hooks.get(event)
+        if not isinstance(existing_groups, list):
+            existing_groups = []
+            merged_hooks[event] = existing_groups
+        for group in groups:
+            _merge_hook_group(existing_groups, group)
+    return merged
+
+
+def _pretty_json(data: dict) -> str:
+    return json.dumps(data, indent=2) + "\n"
+
+
+def _write_json_atomic(path: str, text: str) -> None:
+    """temp file in the SAME directory + fsync + os.replace — same pattern as trust.py/config.py
+    so a crash mid-write can never leave partially-written host settings."""
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".ans-install-hooks-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 
 def print_enforcement_handoff(harness, repo: str) -> None:
     print("")
@@ -210,21 +382,78 @@ def run_init(argv: list[str]) -> int:
     return EX_OK
 
 
-def run_install_hooks(argv: list[str]) -> int:
+def run_install_hooks(argv: list[str], *, ask=input, out=print) -> int:
+    """Wire the ANS deny-hooks into `--harness`'s host settings file: diff + one confirmation,
+    atomic write, then verify `hooks_wired()` is True. No default --harness (consensus #5) — with
+    none given, list every valid target and exit; an unknown harness is rejected. Blast radius:
+    touches ONLY the named harness's settings file, never any other."""
     p = argparse.ArgumentParser(prog="ans-run install-hooks", add_help=True)
     p.add_argument("--harness", default=None, help="claude|codex|gemini|copilot|cursor")
+    p.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (CI one-shot; still diffs first)")
     a = p.parse_args(argv)
     if a.harness and a.harness not in _BLAST_RADIUS:
-        print(f"install-hooks: unknown harness {a.harness!r}; known: {', '.join(_BLAST_RADIUS)}")
+        out(f"install-hooks: unknown harness {a.harness!r}; known: {', '.join(_BLAST_RADIUS)}")
         return EX_ERR
-    # Do NOT default to claude — printing the wrong global path is exactly the footgun this feature
-    # exists to prevent. With no --harness, show every target so the user chooses knowingly.
-    targets = {a.harness: _BLAST_RADIUS[a.harness]} if a.harness in _BLAST_RADIUS else _BLAST_RADIUS
-    print("install-hooks — guided install (diff + confirm) is pending the UX review.")
     if not a.harness:
-        print("No --harness given; showing all targets so you pick knowingly:")
-    for name, (target, radius) in targets.items():
-        print(f"  {name}: {target}  ({radius})")
-    print("For now follow the manual steps in hooks/README.md (Claude) or hooks/platforms/README.md")
-    print("(other harnesses). Nothing was written.")
+        # Do NOT default to claude — printing/writing the wrong global path is exactly the footgun
+        # this feature exists to prevent. With no --harness, show every target so the user picks
+        # knowingly; nothing is written.
+        out("install-hooks — pick a target so the right config is touched:")
+        for name, (target, radius) in _BLAST_RADIUS.items():
+            out(f"  {name}: {target}  ({radius})")
+        out("Usage: ans-run install-hooks --harness <name> [--yes]")
+        return EX_OK
+
+    harness = a.harness
+    target, radius = _BLAST_RADIUS[harness]
+
+    if harness not in _HOME_HARNESS_SETTINGS:
+        # Accepted target, but project-local with a different write model (drop-in file for
+        # copilot; a flatter schema for cursor) and this command has no --repo — hand off rather
+        # than guess a repo path or half-write a schema this task didn't verify end-to-end.
+        out(f"install-hooks: {harness} is a valid target ({target}, {radius}) but its config is "
+            f"project-local — automatic merge isn't wired up for it yet. Follow the manual steps "
+            f"in hooks/platforms/README.md.")
+        return EX_OK
+
+    if hooks_wired(harness):
+        out(f"install-hooks: {harness} is already wired ({target}) — nothing to do.")
+        return EX_OK
+
+    path = _settings_path(harness)
+    existing = _read_json(path) or {}
+    snippet = _load_snippet(harness)
+    merged = _merge_settings(existing, snippet)
+
+    before_text = _pretty_json(existing)
+    after_text = _pretty_json(merged)
+    diff = list(difflib.unified_diff(before_text.splitlines(keepends=True),
+                                      after_text.splitlines(keepends=True),
+                                      fromfile=path, tofile=path))
+    out(f"install-hooks — target: {path}  ({radius})")
+    out("".join(diff) if diff else "(no changes)")
+
+    if not a.yes:
+        # Never hang: only prompt on a real TTY. Non-interactive (CI, this test suite, a piped
+        # invocation) with no --yes declines and returns promptly — nothing is written.
+        if not sys.stdin.isatty():
+            out("install-hooks: non-interactive and no --yes — declining to write. "
+                "Re-run with --yes to confirm non-interactively.")
+            return EX_OK
+        try:
+            reply = ask("Write these hooks into the settings above? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            out("install-hooks: not confirmed — nothing written.")
+            return EX_OK
+
+    _write_json_atomic(path, after_text)
+
+    if not hooks_wired(harness):
+        out(f"install-hooks: wrote {path} but hooks_wired({harness!r}) is still False — "
+            f"something's off; please inspect {path} by hand.")
+        return EX_ERR
+    out(f"✓ enforcement hooks wired for {harness}")
     return EX_OK
