@@ -103,6 +103,48 @@ def test_install_hooks_yes_writes_and_hooks_wired_true_after():
     _with_home(run)
 
 
+def test_install_hooks_recovers_when_settings_has_stale_dead_entry_for_same_marker():
+    # Moved/deleted-install recovery flow (Task B): the settings file already has a STALE entry
+    # for a marker (old moved-away script path) when install-hooks runs. The merge appends the
+    # fresh LIVE entry alongside it (same marker, different command), so the file ends up with
+    # BOTH a dead and a live command for that marker. hooks_wired()'s self-verify must count the
+    # marker as wired because the live one exists, not bail out because the stale one it happens
+    # to hit first doesn't. Before the fix, next()-first-match picked the stale entry and
+    # hooks_wired() stayed False forever — a dead end in exactly this recovery path.
+    from agents_never_sleep import init_cmd
+
+    def run(home):
+        p = pathlib.Path(home, ".claude", "settings.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        missing = os.path.join(home, "moved-away", "agents-never-sleep", "hooks")
+        data = {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command",
+                                      "command": os.path.join(missing, "stop_guard.sh")}]}],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command",
+                                                    "command": os.path.join(missing, "deny_irreversible.sh")}]},
+                    {"matcher": "AskUserQuestion", "hooks": [{"type": "command",
+                                                               "command": os.path.join(missing, "deny_ask.sh")}]},
+                ],
+            }
+        }
+        p.write_text(json.dumps(data))
+        assert init_cmd.hooks_wired("claude", home=home) is False  # sanity: stale-only is not wired
+
+        rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+        assert rc == 0, rc
+        assert init_cmd.hooks_wired("claude", home=home) is True
+
+        # both the stale dead entry and the fresh live entry must be present afterward — the
+        # merge is additive (different command strings), not a replace.
+        after = json.loads(p.read_text())
+        cmds = json.dumps(after)
+        assert missing in cmds, "stale entry must survive the merge unchanged"
+        assert REPO_ROOT in cmds, "fresh live entry must have been added"
+    _with_home(run)
+
+
 def test_install_hooks_second_run_is_idempotent_no_duplicates():
     from agents_never_sleep import init_cmd
 

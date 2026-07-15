@@ -221,8 +221,7 @@ def hooks_wired(harness: str, *, home: str | None = None) -> bool:
         return False
     commands = _all_hook_commands(hooks_obj)
     for marker in info["markers"]:
-        matched = next((cmd for cmd in commands if marker in cmd), None)
-        if matched is None or not _hook_script_exists(matched):
+        if not any(_hook_script_exists(cmd) for cmd in commands if marker in cmd):
             return False
     return True
 
