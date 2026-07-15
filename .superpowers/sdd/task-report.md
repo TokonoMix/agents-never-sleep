@@ -244,3 +244,16 @@ explicit design instruction — not a deviation from "canonical and unchanged."
   shape* is tested via `test_enforce_platforms.py`, which calls `agents_never_sleep.enforce`
   directly and never reads these JSON files. The `bash ` prefix added to them is a mechanical,
   low-risk change but is unverified beyond visual inspection + the doc updates.
+- **Enforcement-at-runtime depends on which `python3` Claude Code spawns the hook with, not just
+  on `install-hooks` having written correct paths.** `deny_irreversible.sh` does
+  `python3 -m agents_never_sleep.enforce claude pre_tool || true; exit 0` — fail-open by design.
+  Gate #3(c) proved the deny fires with the installing venv's `bin/` on `PATH` (matching how a
+  normal `pip install` + activate leaves a shell). If a wheel-install user's Claude Code session
+  instead runs under a *different* `python3` that can't `import agents_never_sleep` (a bare
+  system Python, a different venv), the import fails, `|| true` swallows it, and the hook
+  silently ALLOWS instead of denying — no error surfaced. The source-checkout path sidesteps this
+  by `cd`-ing to the repo root before `python3 -m` (so any `python3` with the checkout on-disk
+  resolves it via CWD), which a wheel install has no equivalent for. This is inherent to how the
+  wheel-fallback enforcement path resolves its interpreter, not a defect introduced by this
+  change, and is out of this task's explicit scope (packaging + resolver + exec-bit only) — flagged
+  here so it doesn't get mistaken for "enforcement is guaranteed once install-hooks succeeds."
