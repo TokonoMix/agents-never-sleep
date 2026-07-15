@@ -10,6 +10,43 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-15
+
+Onboarding hardening: close the "init said ready, but enforcement isn't wired" gap and cut
+re-trust friction. Derived from a cross-model consensus on an external reviewer's tips, verified
+against source. Additive/behaviour-refining (no API, schema, or entry-point change), so MINOR —
+**with one one-time migration** (see below).
+
+### Added
+- **`ans-run install-hooks` now actually wires the ANS deny-hooks** into the host settings file
+  (Claude Code `~/.claude/settings.json`) with a unified diff + one confirmation (was an honest
+  stub). Atomic write; idempotent; never clobbers a pre-existing `permissions` block or unrelated
+  hooks; still requires an explicit `--harness` (no default), rejects unknown harnesses, and accepts
+  enforcement-only targets like `cursor` (handoff). New `hooks_wired()` detector. On a pip/wheel
+  install the hook scripts are not packaged, so it degrades **gracefully** with an actionable message
+  (use the source checkout / installed skill) instead of crashing.
+- **Non-blocking preflight NOTE:** the launcher now tells you at start when the selected harness's
+  enforcement hooks are not wired (or reference a missing script — catches a moved/deleted install),
+  and names the remedy (`ans-run install-hooks --harness <h>`). It is a **NOTE, never a NO-GO** — the
+  run still proceeds on the prose-contract; the trusted-operator model is unchanged.
+- **`ans-run init` can pre-authorize deny-list consent classes** during interactive onboarding
+  (per-class, via a helper shared with the wizard — anti-drift). `--yes` writes **no** consent
+  (skipping prompts never authorizes execution). `send_email` is called out as a prompt-injection
+  exfiltration surface with no per-run gate once pre-authorized.
+
+### Changed
+- **TOFU trust digest now hashes canonical JSON** (sorted object keys, normalized separators) instead
+  of raw config bytes, so a cosmetic re-save (whitespace / key reordering) no longer forces a
+  re-`--trust`. Weakens nothing: any semantic difference (a changed command, autonomy flag, gate name,
+  agent preset, array order — arrays stay ordered) still changes the digest; invalid JSON falls back to
+  the raw-bytes hash. Field-level narrowing to a security-fields allowlist is deliberately deferred
+  (it carries a maintenance-drift risk).
+
+### Migration
+- The canonical-digest change alters the stored digest of **every previously-trusted config**, so the
+  first run after upgrading re-prompts for `--trust` **once** per repo (no auto-migration). Expected
+  and harmless.
+
 ## [1.6.0] — 2026-07-15
 
 First-touch onboarding: `ans-run init` takes a freshly cloned repo from "just cloned" to "a run
