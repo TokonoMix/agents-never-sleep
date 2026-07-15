@@ -157,6 +157,30 @@ _BLAST_RADIUS = {
 # real absolute path — the same path substituted into the hook snippets below.
 _PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+# This module's own directory — the wheel-packaged fallback root. A pip/wheel install ships a
+# read-only copy of the hooks/ tree at agents_never_sleep/hooks/ (package-data; see
+# pyproject.toml), so `_PACKAGED_HOOKS_ROOT/hooks` is always a real hooks/ dir for a pip install
+# even though it has no repo-root hooks/ next to _PACKAGE_ROOT. Kept as its own name (not derived
+# from _PACKAGE_ROOT) so the two resolution roots vary independently — including in tests that
+# monkeypatch one without the other.
+_PACKAGED_HOOKS_ROOT = os.path.dirname(os.path.realpath(__file__))
+
+
+def _hooks_root() -> str:
+    """Root-first, package-fallback resolver for the hooks/ tree. Prefers the repo-root hooks/
+    next to this checkout (canonical, editable — identical to pre-packaging behavior, so a
+    source-checkout install like the live dev01 one is completely unaffected). Falls back to the
+    read-only copy shipped inside the wheel at agents_never_sleep/hooks/ when there is no
+    repo-root hooks/ at all, e.g. a pure `pip install agents-never-sleep`. This is the single
+    place hooks-tree resolution happens — every root-hooks/ lookup in this module routes through
+    it so checkout and wheel installs can never diverge in how a path is built, only in which
+    root they land on."""
+    checkout_hooks = os.path.join(_PACKAGE_ROOT, "hooks")
+    if os.path.isdir(checkout_hooks):
+        return checkout_hooks
+    return os.path.join(_PACKAGED_HOOKS_ROOT, "hooks")
+
+
 # Harnesses `install-hooks` can actually MERGE into: a single host settings JSON file at a
 # fixed, HOME-relative path, using the nested `hooks: {Event: [{matcher?, hooks:[...]}]}` shape.
 # copilot/cursor are project-local (repo-relative, different write model — a drop-in file for
@@ -224,12 +248,37 @@ def _all_hook_commands(hooks_obj) -> list[str]:
 
 
 def _hook_script_exists(cmd: str) -> bool:
-    """The first whitespace-separated token of a hook `command` string is the script path
-    (some platforms append CLI args after it, e.g. 'enforce.sh gemini pre_tool'). True iff
-    that script still exists on disk — a settings file can keep naming a script from a
-    moved/deleted ANS install, which is dead enforcement even though the reference is intact."""
-    token = cmd.strip().split(" ", 1)[0] if cmd.strip() else ""
-    return bool(token) and os.path.isfile(token)
+    """The script path token of a hook `command` string, checked for existence on disk — a
+    settings file can keep naming a script from a moved/deleted ANS install, which is dead
+    enforcement even though the reference is intact. The command is either the script invoked
+    directly (`<script> [args]`, some platforms append CLI args after it, e.g. 'enforce.sh
+    gemini pre_tool') or explicitly via `bash <script> [args]` — the wired form since wheel
+    package-data loses the +x bit, so the script can't rely on being directly executable. Skip a
+    leading bare `bash` interpreter token before taking the script path, so both forms resolve
+    to the same script."""
+    tokens = cmd.strip().split()
+    if not tokens:
+        return False
+    idx = 1 if tokens[0] == "bash" and len(tokens) > 1 else 0
+    return os.path.isfile(tokens[idx])
+
+
+def _enforcement_python_can_import() -> bool:
+    """True iff `python3` on PATH can `import agents_never_sleep` — the interpreter the wired
+    hook scripts actually invoke at enforcement time (`python3 -m agents_never_sleep.enforce ...
+    || true`). This is deliberately checked with a FRESH `python3` subprocess rather than trusting
+    `sys.executable`/the running interpreter: install-hooks itself always runs from an environment
+    that has the package (that's how it got invoked), so checking `sys.executable` would always
+    pass and mask the exact gap this exists to catch — a wheel install where Claude Code spawns
+    the hook with a *different* python3 than the one this package was installed into, so the
+    import fails, `|| true` swallows it, and enforcement silently fails open. Best-effort: any
+    failure to even run `python3` (not found, times out) also counts as "can't import"."""
+    try:
+        r = subprocess.run(["python3", "-c", "import agents_never_sleep"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
 
 
 def hooks_wired(harness: str, *, home: str | None = None) -> bool:
@@ -263,10 +312,11 @@ def _hooks_source_ready(harness: str) -> bool:
     source-checkout-only asset (see docs/tutorials/claude-code.md). Checked BEFORE any diff/write
     so a packaged install degrades gracefully instead of a FileNotFoundError traceback."""
     info = _HOME_HARNESS_SETTINGS[harness]
-    snippet_path = os.path.join(_PACKAGE_ROOT, *info["snippet_rel"])
+    hooks_dir = _hooks_root()
+    # snippet_rel's first component is always "hooks" — hooks_dir already points AT that dir.
+    snippet_path = os.path.join(hooks_dir, *info["snippet_rel"][1:])
     if not os.path.isfile(snippet_path):
         return False
-    hooks_dir = os.path.join(_PACKAGE_ROOT, "hooks")
     for marker in info["markers"]:
         script = marker.split(" ", 1)[0]   # marker may carry CLI args after the script name
         if not os.path.isfile(os.path.join(hooks_dir, script)):
@@ -281,14 +331,21 @@ def _load_snippet(harness: str) -> dict | None:
     have already checked `_hooks_source_ready`, so this is a belt-and-braces net, not the
     primary guard."""
     info = _HOME_HARNESS_SETTINGS[harness]
-    snippet_path = os.path.join(_PACKAGE_ROOT, *info["snippet_rel"])
+    hooks_dir = _hooks_root()
+    # snippet_rel's first component is always "hooks" — hooks_dir already points AT that dir.
+    snippet_path = os.path.join(hooks_dir, *info["snippet_rel"][1:])
     try:
         with open(snippet_path, "r", encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
         return None
     placeholder = info["placeholder"]
-    replacement = (_PACKAGE_ROOT + "/") if placeholder.endswith("/") else _PACKAGE_ROOT
+    # The placeholder templates a "skill root" (parent of hooks/), not hooks_dir itself — the
+    # snippet text already spells out "/hooks/<script>" after it. dirname(hooks_dir) is that
+    # root under EITHER resolution: the checkout root when hooks_dir is the repo-root hooks/, or
+    # this package's own dir when hooks_dir is the wheel-packaged fallback.
+    root = os.path.dirname(hooks_dir)
+    replacement = (root + "/") if placeholder.endswith("/") else root
     return json.loads(text.replace(placeholder, replacement))
 
 
@@ -535,4 +592,15 @@ def run_install_hooks(argv: list[str], *, ask=input, out=print) -> int:
             f"something's off; please inspect {path} by hand.")
         return EX_ERR
     out(f"✓ enforcement hooks wired for {harness}")
+    if _enforcement_python_can_import():
+        out("✓ enforcement check: this system's `python3` can import agents_never_sleep — "
+            "enforcement will run.")
+    else:
+        out("WARNING: enforcement may FAIL OPEN — the `python3` on PATH here cannot "
+            "`import agents_never_sleep`. The wired hooks run `python3 -m "
+            "agents_never_sleep.enforce ... || true`; if the harness invokes that hook with a "
+            "python3 that can't see this package, the import fails, `|| true` swallows it, and "
+            "dangerous commands are ALLOWED with no error. Run ans-run (and the harness it "
+            "launches) from the same environment/venv where agents-never-sleep is installed, or "
+            "use the source-checkout install, to close this gap.")
     return EX_OK

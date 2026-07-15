@@ -65,7 +65,14 @@ include = ["agents_never_sleep*", "harness*"]
 # PEP 561: ship the py.typed marker so type-checkers (mypy/pyright) consume the package's
 # inline annotations instead of treating it as untyped. The package is fully annotated. (The
 # `harness` shim is deprecated and intentionally ships no py.typed.)
-agents_never_sleep = ["py.typed"]
+#
+# hooks/**: the wheel-shipped copy of the enforcement hook scripts (deny_ask.sh,
+# deny_irreversible.sh, enforce.sh, stop_guard.sh, settings-snippet.json, README.md, and the
+# whole platforms/** tree), so `ans-run install-hooks` works from a pure `pip install` too — not
+# just a source checkout. This is a COMMITTED mirror of the repo-root hooks/ (drift-guarded by
+# acceptance/test_hooks_packaged.py), never the canonical copy: the resolver
+# (agents_never_sleep.init_cmd._hooks_root) always prefers the repo-root hooks/ when present.
+agents_never_sleep = ["py.typed", "hooks/**"]
 
 [tool.pytest.ini_options]
 # `@pytest.mark.integration` tests spawn a REAL agent CLI (claude -p) — slow + costs tokens.

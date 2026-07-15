@@ -1,0 +1,7 @@
+name: agents-never-sleep
+version: 1.1.0
+description: "Enforce the agents-never-sleep autonomy contract during UNATTENDED Hermes runs: deny irreversible/outward commands and deny the `clarify` tool (preempting the fail-open clarify-timeout that invents consent) — turning an ASK into an explicit PARK. Inert unless UE_UNATTENDED=1."
+author: "agents-never-sleep (Tokonomix)"
+kind: standalone
+hooks:
+  - pre_tool_call

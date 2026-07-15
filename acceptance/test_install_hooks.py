@@ -251,19 +251,24 @@ def test_gemini_and_codex_also_wire_and_verify():
 
 
 def test_install_hooks_degrades_gracefully_when_hooks_source_missing():
-    # Simulates a pip/wheel install: the package root has no hooks/ tree next to it (the wheel
-    # ships the launcher only — hooks/*.sh + settings-snippet.json are a source-checkout-only
-    # asset). Before the fix, `_load_snippet` did a bare `open()` on the missing snippet file and
+    # True absence of a hooks/ tree ANYWHERE this install could find one — neither the repo-root
+    # checkout location NOR the wheel-packaged fallback (agents_never_sleep/hooks/) has a hooks/
+    # subdir. Before the fix, `_load_snippet` did a bare `open()` on the missing snippet file and
     # raised an uncaught FileNotFoundError. Now install-hooks must detect this BEFORE any
     # diff/write, print an actionable message, return the error exit code, and never raise or
-    # touch the settings file.
+    # touch the settings file. (Since the packaged-hooks fallback was added, a REAL pip/wheel
+    # install now DOES ship hooks/ — this test fakes BOTH resolver roots to still exercise the
+    # "genuinely no hooks source at all" branch.)
     from agents_never_sleep import init_cmd
     import io, contextlib
 
     def run(home):
-        fake_root = tempfile.mkdtemp()  # no hooks/ subdir at all
+        fake_root = tempfile.mkdtemp()       # no hooks/ subdir at all (checkout guess)
+        fake_packaged = tempfile.mkdtemp()   # no hooks/ subdir at all (packaged-fallback guess)
         old_root = init_cmd._PACKAGE_ROOT
+        old_packaged = init_cmd._PACKAGED_HOOKS_ROOT
         init_cmd._PACKAGE_ROOT = fake_root
+        init_cmd._PACKAGED_HOOKS_ROOT = fake_packaged
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -271,12 +276,135 @@ def test_install_hooks_degrades_gracefully_when_hooks_source_missing():
             out = buf.getvalue()
         finally:
             init_cmd._PACKAGE_ROOT = old_root
+            init_cmd._PACKAGED_HOOKS_ROOT = old_packaged
         assert rc == init_cmd.EX_ERR, rc
         assert "source checkout" in out, out
         assert "docs/tutorials/claude-code.md" in out, out
         assert not pathlib.Path(home, ".claude", "settings.json").exists()
         assert init_cmd.hooks_wired("claude", home=home) is False
     _with_home(run)
+
+
+def test_hooks_root_prefers_checkout_when_present():
+    # Root-first: with a real repo-root hooks/ next to this checkout, _hooks_root() must return
+    # it — identical to today's (pre-packaging) resolution. This is the guarantee that packaging
+    # hooks into the wheel never changes checkout behavior.
+    from agents_never_sleep import init_cmd
+    assert init_cmd._hooks_root() == os.path.join(init_cmd._PACKAGE_ROOT, "hooks")
+
+
+def test_hooks_root_falls_back_to_packaged_copy_when_checkout_hooks_missing():
+    # Simulates a pure pip/wheel install: _PACKAGE_ROOT (the checkout-root guess) has no hooks/
+    # subdir at all, so the resolver must fall back to the copy packaged inside
+    # agents_never_sleep/hooks/ (which a real pip install ships via package-data).
+    from agents_never_sleep import init_cmd
+
+    fake_root = tempfile.mkdtemp()  # no hooks/ subdir — simulates a wheel install's site-packages
+    old_root = init_cmd._PACKAGE_ROOT
+    init_cmd._PACKAGE_ROOT = fake_root
+    try:
+        expected = os.path.join(init_cmd._PACKAGED_HOOKS_ROOT, "hooks")
+        assert init_cmd._hooks_root() == expected
+        assert os.path.isdir(expected), \
+            "packaged hooks/ copy must actually exist for this fallback to be real"
+    finally:
+        init_cmd._PACKAGE_ROOT = old_root
+
+
+def test_install_hooks_uses_packaged_copy_when_checkout_hooks_missing():
+    # End-to-end: with no repo-root hooks/ available (checkout guess faked away), install-hooks
+    # must still succeed by resolving through the packaged fallback, and the written command must
+    # reference the packaged copy's path.
+    from agents_never_sleep import init_cmd
+
+    def run(home):
+        fake_root = tempfile.mkdtemp()
+        old_root = init_cmd._PACKAGE_ROOT
+        init_cmd._PACKAGE_ROOT = fake_root
+        try:
+            rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            assert rc == 0, rc
+            assert init_cmd.hooks_wired("claude", home=home) is True
+            data = json.loads(pathlib.Path(home, ".claude", "settings.json").read_text())
+            cmds = json.dumps(data)
+            assert init_cmd._PACKAGED_HOOKS_ROOT in cmds
+        finally:
+            init_cmd._PACKAGE_ROOT = old_root
+    _with_home(run)
+
+
+def test_hook_script_exists_handles_bash_prefixed_command():
+    # Wheel package-data loses the +x bit, so the wired command form is `bash <script> [args]`
+    # instead of a directly-executable `<script> [args]`. _hook_script_exists must skip a leading
+    # bare `bash` interpreter token before taking the script path, for both forms.
+    from agents_never_sleep import init_cmd
+
+    fd, path = tempfile.mkstemp(suffix=".sh")
+    os.close(fd)
+    try:
+        assert init_cmd._hook_script_exists(f"bash {path}") is True
+        assert init_cmd._hook_script_exists(path) is True  # direct-exec form still works
+        assert init_cmd._hook_script_exists(f"bash {path} extra args") is True
+        assert init_cmd._hook_script_exists("bash /definitely/not/a/real/path.sh") is False
+        assert init_cmd._hook_script_exists("") is False
+    finally:
+        os.unlink(path)
+
+
+def test_install_hooks_warns_when_enforcement_python_cannot_import():
+    # Silent-fail-open guard: if the `python3` on PATH at hook-invocation time can't
+    # `import agents_never_sleep` (e.g. a wheel install where Claude Code spawns the hook with a
+    # different interpreter than the venv that has the package), enforce.py ModuleNotFounds, the
+    # hook script's `|| true` swallows it, and the hook silently ALLOWS instead of denying. Wiring
+    # itself still succeeded (rc==0, settings written) — this is a visible WARNING, not a NO-GO.
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+
+    def run(home):
+        old = init_cmd._enforcement_python_can_import
+        init_cmd._enforcement_python_can_import = lambda: False
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            out = buf.getvalue()
+        finally:
+            init_cmd._enforcement_python_can_import = old
+        assert rc == 0, rc  # wiring succeeded; the import gap is a warning, not an error
+        assert init_cmd.hooks_wired("claude", home=home) is True
+        assert "WARNING" in out, out
+        assert "FAIL OPEN" in out, out
+        assert "agents_never_sleep" in out, out
+    _with_home(run)
+
+
+def test_install_hooks_confirms_when_enforcement_python_can_import():
+    # Success path: when the check passes, print a positive confirmation instead of a warning.
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+
+    def run(home):
+        old = init_cmd._enforcement_python_can_import
+        init_cmd._enforcement_python_can_import = lambda: True
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            out = buf.getvalue()
+        finally:
+            init_cmd._enforcement_python_can_import = old
+        assert rc == 0, rc
+        assert "WARNING" not in out, out
+        assert "enforcement will run" in out, out
+    _with_home(run)
+
+
+def test_enforcement_python_can_import_reflects_real_python3():
+    # Sanity on the real (unmocked) helper: in THIS test environment python3 on PATH can import
+    # the package (it's how these tests themselves run), so the check must report True — proves
+    # the subprocess probe isn't just always-False.
+    from agents_never_sleep import init_cmd
+    assert init_cmd._enforcement_python_can_import() is True
 
 
 def test_real_home_settings_untouched_by_this_suite():
