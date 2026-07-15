@@ -19,7 +19,7 @@ from .state import OutcomeState
 # report emits — same slug rule the ticket loader enforces on a declared agent. Applied to BOTH the
 # agent name AND the ticket ids (redact() scrubs secrets, not shell syntax), so neither half of that
 # command can carry whitespace / shell-meta / a newline a careless operator would paste or that would
-# forge report lines.
+# forge report lines..
 _CMD_SAFE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 # Severity order for the report (worst/most-actionable first).
