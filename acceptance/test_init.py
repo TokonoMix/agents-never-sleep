@@ -10,6 +10,7 @@ import pathlib
 import sys
 import tempfile
 import subprocess
+import unittest.mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, REPO_ROOT)
@@ -167,7 +168,13 @@ def test_interactive_records_trust_in_ans_store_not_home():
     init_cmd.agent_clis.installed_clis = lambda: ["claude"]   # single → no prompt
     old = os.environ.get("HOME"); os.environ["HOME"] = home
     try:
-        rc = init_cmd.run_init(["--repo", repo])   # NO --yes → interactive path
+        # This test's intent is trust recording, not consent — force the consent step's non-tty
+        # decline branch (no --yes needed for that) so it can never block on input() waiting for
+        # a human when run_all.sh is invoked from a real terminal (Task C added an interactive
+        # input()-driving branch to run_init; this test predates it and doesn't isolate
+        # ANS_CONSENT_STORE, so it must not reach that branch).
+        with unittest.mock.patch.object(init_cmd, "_stdin_is_tty", return_value=False):
+            rc = init_cmd.run_init(["--repo", repo])   # NO --yes → interactive path
         assert rc == 0
         # is_trusted resolves the trust-store path from HOME at call time (like record_trust) —
         # check it while HOME still points at the test home, not the real one restored below.
