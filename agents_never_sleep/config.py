@@ -206,6 +206,59 @@ def is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty() and not os.environ.get("CLAUDE_UNATTENDED")
 
 
+def prompt_and_write_consent(repo_dir: str, *, ask, by: str | None = None) -> dict:
+    """Shared consent "Actions" prompt + write — the SOLE copy of this UI (anti-drift; same
+    principle as agent_clis.scaffold_preset). Called by BOTH `run_wizard` and `ans-run init`
+    (init_cmd.run_init) so the two onboarding entry points can never drift apart.
+
+    Enumerates enforcement._IRREVERSIBLE's unique action-class slugs and prompts per class via
+    the caller-supplied `ask(prompt, default)` — per-class ONLY, there is no "trust everything"
+    shortcut. If at least one class was ticked, writes the pre-authorization to the OUT-OF-REPO
+    consent store (consent_store.write) — never into cfg / save_config, so the unattended agent
+    can never author its own consent by editing the in-repo config. Always prints a summary of
+    what was (or wasn't) pre-authorized.
+
+    `ask` fully owns the actual input() wiring (and any EOF/non-TTY guard) — this function is
+    interactive-only by construction: whether/how to prompt at all is the caller's decision.
+
+    Returns the `ticked` dict ({slug: {"allowed": True}, ...}) actually written (empty if none).
+    """
+    from . import enforcement
+    seen_slugs = []
+    reason_for = {}
+    for _, reason, slug in enforcement._IRREVERSIBLE:
+        if slug not in reason_for:
+            seen_slugs.append(slug)
+            reason_for[slug] = reason
+    print("")
+    print("=== Actions ANS may perform unattended (pre-authorize deny-list classes) ===")
+    print("  Consent here lowers the safety floor for the WHOLE run, across EVERY reachable")
+    print("  target of that action class — there is no per-call / per-target check. Only")
+    print("  pre-authorize a high-blast-radius class for a run scoped to a non-critical")
+    print("  environment. Per-class only — there is no 'trust everything' shortcut.")
+    print("  send_email is a PROMPT-INJECTION EXFILTRATION SURFACE: once pre-authorized, it is")
+    print("  reachable by ANY prompt-injected content the agent later reads or fetches, with no")
+    print("  per-run gate — even under a trusted operator. Think hard before ticking it.")
+    ticked = {}
+    for slug in seen_slugs:
+        allowed = ask(f"  Pre-authorize {slug} ({reason_for[slug]})? (y/n)", "n").lower().startswith("y")
+        if allowed:
+            ticked[slug] = {"allowed": True}
+    if ticked:
+        if by is None:
+            import getpass
+            try:
+                by = getpass.getuser()
+            except Exception:  # noqa: BLE001 - best-effort attribution only
+                by = "unknown"
+        from . import consent_store
+        consent_store.write(repo_dir, actions=ticked, by=by, backlog_fingerprint=None)
+        print(f"  Pre-authorized: {', '.join(sorted(ticked))}")
+    else:
+        print("  No actions pre-authorized.")
+    return ticked
+
+
 def run_wizard(repo_dir: str, profile) -> dict:
     """Minimal interactive wizard. Refuses to run unattended (returns conservative defaults)."""
     cfg = default_config(profile)
@@ -336,33 +389,9 @@ def run_wizard(repo_dir: str, profile) -> dict:
     # Pre-authorize deny-list action classes (Part B of the unattended safety model). This is
     # NOT part of cfg / save_config on purpose: consent lives OUT-OF-REPO (consent_store.py,
     # keyed off ~/.config, TOFU-style like trust.py) so the unattended agent structurally cannot
-    # author its own consent by editing the in-repo config.
-    from . import enforcement
-    seen_slugs = []
-    reason_for = {}
-    for _, reason, slug in enforcement._IRREVERSIBLE:
-        if slug not in reason_for:
-            seen_slugs.append(slug)
-            reason_for[slug] = reason
-    print("")
-    print("=== Actions ANS may perform unattended (pre-authorize deny-list classes) ===")
-    print("  Consent here lowers the safety floor for the WHOLE run, across EVERY reachable")
-    print("  target of that action class — there is no per-call / per-target check. Only")
-    print("  pre-authorize a high-blast-radius class (especially redis_flush, send_email) for")
-    print("  runs scoped to non-critical environments.")
-    ticked = {}
-    for slug in seen_slugs:
-        allowed = ask(f"  Pre-authorize {slug} ({reason_for[slug]})? (y/n)", "n").lower().startswith("y")
-        if allowed:
-            ticked[slug] = {"allowed": True}
-    if ticked:
-        import getpass
-        try:
-            by = getpass.getuser()
-        except Exception:  # noqa: BLE001 - best-effort attribution only
-            by = "unknown"
-        from . import consent_store
-        consent_store.write(repo_dir, actions=ticked, by=by, backlog_fingerprint=None)
+    # author its own consent by editing the in-repo config. Shared with `ans-run init`
+    # (init_cmd.run_init) via prompt_and_write_consent — see that function for the UI + write.
+    prompt_and_write_consent(repo_dir, ask=ask)
 
     save_config(repo_dir, cfg)
     print(f"Saved config to {config_path(repo_dir)}")

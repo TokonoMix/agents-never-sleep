@@ -64,6 +64,36 @@ def maturity_lines(platform):
     return lines
 
 
+def _stdin_is_tty() -> bool:
+    """Indirection point so tests can force the interactive-consent branch deterministically
+    without a real controlling terminal (same idiom as config.is_interactive, split out here
+    because run_init's interactivity test is --yes-aware, not identical to that function)."""
+    return sys.stdin.isatty()
+
+
+def _ask_consent(prompt: str, default: str) -> str:
+    """input()-backed consent prompt, EOFError-guarded so a closed/non-TTY stdin mid-prompt can
+    never hang the run — falls back to `default` exactly like install_hooks' EOFError handling."""
+    try:
+        ans = input(f"{prompt} [{default}]: ").strip()
+    except EOFError:
+        return default
+    return ans or default
+
+
+def offer_consent_preauthorization(repo: str, *, assume_yes: bool) -> None:
+    """Onboarding-time consent pre-choice (Task C): offer the SAME per-class "Actions" prompt the
+    wizard has, via the shared config.prompt_and_write_consent helper — never a re-implementation.
+    Under --yes (non-interactive) or a non-TTY stdin, write NO consent (skip-prompts must not
+    silently authorize execution) and print a one-line pointer to re-run interactively."""
+    if assume_yes or not _stdin_is_tty():
+        print("")
+        print("No actions pre-authorized; re-run `ans-run` (the wizard), or `ans-run init` "
+              "interactively, to pre-authorize deny-list classes.")
+        return
+    config.prompt_and_write_consent(repo, ask=_ask_consent)
+
+
 def _is_git_repo(repo: str) -> bool:
     try:
         r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo,
@@ -390,6 +420,7 @@ def run_init(argv: list[str]) -> int:
         print("Config not yet trusted — before a DETACHED run: `ans-run --trust --repo <repo>` "
               "(or re-run `ans init --yes --trust`).")
 
+    offer_consent_preauthorization(repo, assume_yes=a.yes)   # Task C
     write_demo_tickets(repo, cfg)          # Task 4
     print_enforcement_handoff(harness, repo)   # Task 5 — harness may be None (generic handoff)
     return EX_OK
