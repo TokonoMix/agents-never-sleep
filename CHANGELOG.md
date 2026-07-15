@@ -10,6 +10,34 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-15
+
+First-touch onboarding: `ans-run init` takes a freshly cloned repo from "just cloned" to "a run
+can start" — without ever writing host/global config. Additive and backward compatible (no change
+to existing surfaces), so a MINOR bump.
+
+### Added — `ans-run init` (new public surface)
+- **`ans-run init`** scaffolds a safe per-project config: detects the installed agent CLI and the
+  project's test/quality gates (now including Go `go test` and Rust `cargo test`), prints an honest
+  enforcement-maturity notice (live-verified vs per-docs), writes the config via
+  `config.default_config`, and drops inert example tickets under `.claude/ans-examples/` (never the
+  discovered `tickets/` source, so they never auto-run).
+- **TOFU trust policy:** the interactive path records trust in the ANS store only (never a harness
+  config); a bare `--yes` does **not** auto-trust (skipping prompts is not authorizing execution),
+  while `--yes --trust` is the explicit CI one-shot. `--force` overwrites an existing config.
+- **`ans-run install-hooks`** ships as an honest stub: it prints the per-harness handoff and writes
+  **nothing** to host/global config; the real installer (diff + confirm, schema-safe nested write)
+  remains deferred. Enforcement-only platforms (e.g. `cursor`) are valid `install-hooks` targets
+  even though `init` never selects them (ANS enforces on more platforms than it launches).
+
+### Safety
+- **Blast-radius invariant:** `init` never writes a harness's global config (`~/.claude`,
+  `~/.gemini`, `~/.codex` are byte-unchanged), and `run_init` calls `scaffold_preset(confirmed=False)`
+  on every path and never writes consent — so it **cannot** enable unattended autonomy or lower the
+  v1.5 deny-list floor by construction. The v1.5 consent/consensus wizard behaviour is preserved
+  (regression-guarded by `acceptance/test_init_v15_guard.py`).
+- Launch-time-only: `init_cmd.py` is never imported by the re-invoked cycling path.
+
 ## [1.5.0] — 2026-07-14
 
 The unattended safety model: a conservative deny-list **floor** plus a run-setup **consent
