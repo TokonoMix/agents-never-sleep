@@ -10,6 +10,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-15
+
+Makes v1.7.0's `install-hooks` reach the canonical `pip install` channel, and closes a silent
+fail-open it exposed. Packaging + a visibility guard — no API change (PATCH).
+
+### Fixed
+- **`ans-run install-hooks` now works from a pure `pip install`.** The `hooks/` tree (scripts +
+  `settings-snippet.json` + `platforms/**`) is now packaged in the wheel; the path resolver prefers the
+  repo-root `hooks/` (source checkout — behaviour byte-identical) and falls back to the packaged copy for
+  wheel installs. A drift-guard test keeps the two copies identical. Wired commands invoke `bash <script>`
+  so the wheel's lost executable bit doesn't matter. This **supersedes the 1.7.0 note** that hooks were
+  unpackaged (they no longer degrade to a stub on pip). Verified end-to-end: a fresh venv `pip install` →
+  `install-hooks` → a real `git push --force` is denied.
+
+### Safety
+- **`install-hooks` now WARNS at wire time** when the `python3` that would run the hooks cannot
+  `import agents_never_sleep` — surfacing the case where wheel-install enforcement would otherwise
+  **silently fail open** (the hook's `|| true` swallows a `ModuleNotFoundError` and allows the command).
+  Wiring still succeeds; the warning advises running ANS from the same environment where it is installed.
+  A robust cross-layout interpreter fix for the hook scripts themselves is tracked as follow-up work.
+
 ## [1.7.0] — 2026-07-15
 
 Onboarding hardening: close the "init said ready, but enforcement isn't wired" gap and cut
