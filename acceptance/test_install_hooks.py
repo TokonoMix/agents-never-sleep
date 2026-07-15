@@ -250,6 +250,35 @@ def test_gemini_and_codex_also_wire_and_verify():
     _with_home(run)
 
 
+def test_install_hooks_degrades_gracefully_when_hooks_source_missing():
+    # Simulates a pip/wheel install: the package root has no hooks/ tree next to it (the wheel
+    # ships the launcher only — hooks/*.sh + settings-snippet.json are a source-checkout-only
+    # asset). Before the fix, `_load_snippet` did a bare `open()` on the missing snippet file and
+    # raised an uncaught FileNotFoundError. Now install-hooks must detect this BEFORE any
+    # diff/write, print an actionable message, return the error exit code, and never raise or
+    # touch the settings file.
+    from agents_never_sleep import init_cmd
+    import io, contextlib
+
+    def run(home):
+        fake_root = tempfile.mkdtemp()  # no hooks/ subdir at all
+        old_root = init_cmd._PACKAGE_ROOT
+        init_cmd._PACKAGE_ROOT = fake_root
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_install_hooks(["--harness", "claude", "--yes"])
+            out = buf.getvalue()
+        finally:
+            init_cmd._PACKAGE_ROOT = old_root
+        assert rc == init_cmd.EX_ERR, rc
+        assert "source checkout" in out, out
+        assert "docs/tutorials/claude-code.md" in out, out
+        assert not pathlib.Path(home, ".claude", "settings.json").exists()
+        assert init_cmd.hooks_wired("claude", home=home) is False
+    _with_home(run)
+
+
 def test_real_home_settings_untouched_by_this_suite():
     # Snapshot the OPERATOR's real ~/.claude/settings.json (if present) using the real HOME,
     # captured before any test in this module could have overridden it, then verify at the end

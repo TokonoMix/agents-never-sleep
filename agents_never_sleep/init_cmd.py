@@ -256,13 +256,37 @@ def hooks_wired(harness: str, *, home: str | None = None) -> bool:
     return True
 
 
-def _load_snippet(harness: str) -> dict:
-    """The harness's hook snippet with its placeholder replaced by this install's real
-    absolute path (resolved from the package location, never a guessed/relative path)."""
+def _hooks_source_ready(harness: str) -> bool:
+    """True iff this install actually has the hooks/ tree `harness` needs: the snippet file AND
+    every hook script its markers reference. False for a pip/wheel install — the wheel packages
+    the launcher only, hooks/ (settings-snippet.json + the *.sh/enforce.sh scripts) is a
+    source-checkout-only asset (see docs/tutorials/claude-code.md). Checked BEFORE any diff/write
+    so a packaged install degrades gracefully instead of a FileNotFoundError traceback."""
     info = _HOME_HARNESS_SETTINGS[harness]
     snippet_path = os.path.join(_PACKAGE_ROOT, *info["snippet_rel"])
-    with open(snippet_path, "r", encoding="utf-8") as fh:
-        text = fh.read()
+    if not os.path.isfile(snippet_path):
+        return False
+    hooks_dir = os.path.join(_PACKAGE_ROOT, "hooks")
+    for marker in info["markers"]:
+        script = marker.split(" ", 1)[0]   # marker may carry CLI args after the script name
+        if not os.path.isfile(os.path.join(hooks_dir, script)):
+            return False
+    return True
+
+
+def _load_snippet(harness: str) -> dict | None:
+    """The harness's hook snippet with its placeholder replaced by this install's real
+    absolute path (resolved from the package location, never a guessed/relative path).
+    Returns None (never raises) if the snippet file can't be read — the caller is expected to
+    have already checked `_hooks_source_ready`, so this is a belt-and-braces net, not the
+    primary guard."""
+    info = _HOME_HARNESS_SETTINGS[harness]
+    snippet_path = os.path.join(_PACKAGE_ROOT, *info["snippet_rel"])
+    try:
+        with open(snippet_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
     placeholder = info["placeholder"]
     replacement = (_PACKAGE_ROOT + "/") if placeholder.endswith("/") else _PACKAGE_ROOT
     return json.loads(text.replace(placeholder, replacement))
@@ -465,9 +489,20 @@ def run_install_hooks(argv: list[str], *, ask=input, out=print) -> int:
         out(f"install-hooks: {harness} is already wired ({target}) — nothing to do.")
         return EX_OK
 
+    if not _hooks_source_ready(harness):
+        out(f"install-hooks: needs the ANS source checkout — the enforcement hook scripts "
+            f"(hooks/*.sh) are not present in this install. A pip/wheel install ships the "
+            f"launcher only — use the git checkout (or the installed Agent Skill) to wire hooks. "
+            f"See docs/tutorials/claude-code.md.")
+        return EX_ERR
+
     path = _settings_path(harness)
     existing = _read_json(path) or {}
     snippet = _load_snippet(harness)
+    if snippet is None:
+        out(f"install-hooks: could not read the hook snippet for {harness} — nothing written. "
+            f"See docs/tutorials/claude-code.md.")
+        return EX_ERR
     merged = _merge_settings(existing, snippet)
 
     before_text = _pretty_json(existing)
