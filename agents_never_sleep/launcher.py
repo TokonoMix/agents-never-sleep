@@ -51,6 +51,7 @@ import time
 from .agent_clis import (AGENT_CLIS, cli_for_argv, is_allowlisted,
                          is_noninteractive_permission)
 from .fsutil import ensure_private_dir
+from . import init_cmd   # top-level; launch-time-only module, see subcommand dispatch below
 from .keysource import resolve_ref
 from .redact import register_secret
 from .trust import config_digest, is_trusted, record_trust
@@ -885,6 +886,14 @@ def compose_watchdog_argv(full_argv, heartbeat_path, wd_cfg, per_ticket_timeout_
 
 
 def main() -> int:
+    # Subcommand dispatch: `ans-run init ...` / `ans-run install-hooks ...` are recognised
+    # subcommands, routed BEFORE the default prompt path (where an unknown first arg becomes
+    # the agent prompt). Everything after the subcommand token is passed through verbatim.
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
+        return init_cmd.run_init(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "install-hooks":
+        return init_cmd.run_install_hooks(sys.argv[2:])
+
     parser = argparse.ArgumentParser(prog="ans-run", add_help=True)
     parser.add_argument("--repo", default=None, help="working tree (default: cwd)")
     parser.add_argument("--agent", default=None,

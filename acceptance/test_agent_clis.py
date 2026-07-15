@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from agents_never_sleep.agent_clis import (  # noqa: E402
-    AGENT_CLIS, ALLOWLIST, detect_session_platform, is_allowlisted)
+    AGENT_CLIS, ALLOWLIST, detect_session_platform, is_allowlisted, scaffold_preset)
 from agents_never_sleep import preflight  # noqa: E402
 
 
@@ -87,12 +87,26 @@ def test_allowlist_bare_name_only(failures):
             failures.append(f"[allowlist] {bad} must not be allowlisted")
 
 
+def test_scaffold_preset_confirmed_vs_safe(failures):
+    # The single source of a launcher-preset row (config.run_wizard AND init_cmd.run_init both
+    # call this) — confirmed=True must select cmd_unattended, confirmed=False must select
+    # cmd_safe, and the row shape must be exactly {cmd, autonomy_confirmed, env}.
+    for name, spec in AGENT_CLIS.items():
+        row_true = scaffold_preset(name, confirmed=True)
+        row_false = scaffold_preset(name, confirmed=False)
+        if row_true != {"cmd": spec["cmd_unattended"], "autonomy_confirmed": True, "env": {}}:
+            failures.append(f"[scaffold_preset] {name} confirmed=True row wrong: {row_true!r}")
+        if row_false != {"cmd": spec["cmd_safe"], "autonomy_confirmed": False, "env": {}}:
+            failures.append(f"[scaffold_preset] {name} confirmed=False row wrong: {row_false!r}")
+
+
 def main() -> int:
     failures = []
     test_map_shape(failures)
     test_detection_explicit_keys_only(failures)
     test_preflight_uses_shared_detector(failures)
     test_allowlist_bare_name_only(failures)
+    test_scaffold_preset_confirmed_vs_safe(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — agent-CLI map/detection not proven")

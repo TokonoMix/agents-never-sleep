@@ -68,6 +68,10 @@ def _detect_gates(cwd: str) -> list:
     # always-available stdlib fallback when there are unittest-style tests
     if any(n.startswith("test_") and n.endswith(".py") for n in _safe_listdir(cwd)):
         gates.append(("unittest", ["python3", "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"]))
+    if os.path.exists(j("go.mod")):
+        gates.append(("go-test", ["go", "test", "./..."]))
+    if os.path.exists(j("Cargo.toml")):
+        gates.append(("cargo-test", ["cargo", "test"]))
     return gates
 
 

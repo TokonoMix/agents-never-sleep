@@ -131,6 +131,14 @@ def detect_session_platform(env=None) -> str:
     return ""
 
 
+def scaffold_preset(name: str, *, confirmed: bool) -> dict:
+    """The single source of a launcher-preset row. `confirmed` -> the unattended-autonomy cmd; else the
+    safe cmd (autonomy is never enabled without an explicit human confirm)."""
+    spec = AGENT_CLIS[name]
+    return {"cmd": spec["cmd_unattended"] if confirmed else spec["cmd_safe"],
+            "autonomy_confirmed": confirmed, "env": {}}
+
+
 def installed_clis() -> list:
     """Which known agent CLIs resolve in PATH right now (wizard scaffolding input)."""
     return [name for name in AGENT_CLIS if shutil.which(name)]
