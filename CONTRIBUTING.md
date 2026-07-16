@@ -27,14 +27,18 @@ Pure standard library, Python 3.9+. No build step.
 ### Pre-commit redaction check
 
 A committed hook mirrors CI's public-surface redaction gate so an internal identifier is caught
-before it is committed, not after push. Install it once (it symlinks the tracked script into your
-local `.git/hooks/`):
+before it is committed, not after push. Install it once, per clone:
 
 ```bash
-ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+bash scripts/install-git-hooks.sh
 ```
 
-It runs `bash scripts/redact_lint.sh` and blocks the commit if the gate fails.
+This symlinks the tracked `scripts/hooks/pre-commit` into your local `.git/hooks/` (idempotent,
+worktree-aware; pass `--force` to replace an existing hook). The hook runs `bash
+scripts/redact_lint.sh` and blocks the commit if the gate fails. Because git hooks are never
+distributed by `git clone` and `--no-verify` bypasses them, this local hook is the early catch —
+**CI remains the authoritative, non-bypassable gate.** `acceptance/test_precommit_redaction.py`
+proves the hook actually blocks a leak.
 
 ## Pull requests
 
