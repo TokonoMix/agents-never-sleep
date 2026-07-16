@@ -10,6 +10,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Proactive cross-project-op PARK.** The per-ticket classifier now PARKs an unattended ticket
+  that *names* a cross-project / irreversible op (service-control, host-control, or a db-client +
+  DDL/DML) BEFORE it is attempted, surfacing a per-action Rule&nbsp;#11 human grant — instead of the
+  run hitting a mid-run hard-deny from the environment's cross-project safety hook. It mirrors only
+  the pure-text command signals of that hook (not its filesystem `foreign-write` path check, which a
+  ticket-text classifier cannot see reliably); the hook remains the reactive backstop. Attended runs
+  are unaffected (a human answers the confirm live). Local pre-commit redaction hook now also ships a
+  one-command installer (`scripts/install-git-hooks.sh`).
+
 ## [1.7.1] — 2026-07-15
 
 Makes v1.7.0's `install-hooks` reach the canonical `pip install` channel, and closes a silent
