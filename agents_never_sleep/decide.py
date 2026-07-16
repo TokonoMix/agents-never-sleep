@@ -40,6 +40,10 @@ class Decision:
     # consensus-assisted disambiguation is safe (FILE-scoped, reversible). decide.py just TAGS it;
     # the F5 logic + the consensus call live outside the pure classifier (harness/f5.py + driver).
     consensus_resolvable: bool = False
+    # Optional human-facing next-step for a PARK (what the human must DECIDE/GRANT). When blank the
+    # orchestrator falls back to a generic "decide: <title>". Set for cross_project_op so the parked
+    # ticket surfaces the specific Rule #11 grant it needs, not a generic prompt.
+    human_action: str = ""
 
 
 # Enumerated hard-PARK categories. Each maps to (regex, foundational?, scope).
@@ -61,6 +65,46 @@ AMBIGUITY_SIGNALS = (
     r"\b(which|what kind|unclear|ambiguous|tbd|decide|undecided|some sort of|or something)\b",
     r"\?\s*$",
 )
+
+
+# --- Cross-project / irreversible OP signals -----------------------------------------------------
+# A DELIBERATE MIRROR of the COMMAND categories in agentixmesh's CPS confirm-gate
+# (`pm_mesh/cross_project_guard.py`: _SERVICE_CTL_RE / _HOST_CTL_RE / _DB_CLIENT_RE + _SQL_DDL_RE).
+# That hook HARD-DENIES these unattended (a per-action human "ask" can't be answered at 2am, and
+# cross-project mutation is never autonomous — Rule #11). ANS is stdlib-only + standalone so we
+# cannot import it; these patterns are copied and CAN DRIFT — the authoritative source is that file.
+#
+# We mirror ONLY the command-anchored, pure-text categories (service/host/db state-change). We do
+# NOT mirror CPS's `foreign-write` path check: deciding "path outside the current project" needs the
+# real filesystem + git-worktree boundary (a sibling worktree / the main checkout are NOT foreign),
+# which a ticket-text classifier cannot know without false-parking. So foreign-write — the most
+# common but least prose-visible deny — stays CPS's reactive job. This precheck is the high-precision
+# PROACTIVE subset; CPS is the backstop for what prose cannot reveal. (Same honesty as CPS: the DB
+# branch is gated on a real db-client word so prose like "delete the truncate helper" never matches.)
+_XP_SERVICE_CTL_RE = re.compile(
+    r"\b(?:systemctl|service)\b(?![^\n;&|]*--user(?![\w-]))[^\n;&|]*?"
+    r"\b(?:start|stop|restart|try-restart|reload|reload-or-restart|reload-or-try-restart|"
+    r"enable|disable|reenable|preset|preset-all|mask|unmask|daemon-reload|set-default|isolate|"
+    r"kexec|revert|set-property|edit|link)\b",
+    re.I)
+_XP_HOST_CTL_RE = re.compile(r"(?:^|[;&|]\s*|\bsudo\s+)(?:shutdown|reboot|halt|poweroff)\b", re.I)
+_XP_DB_CLIENT_RE = re.compile(
+    r"\b(?:psql|mysql|mariadb|mongo|mongosh|sqlite3|sqlcmd|cockroach|clickhouse-client)\b", re.I)
+_XP_SQL_DDL_RE = re.compile(
+    r"\bALTER\s+SYSTEM\b|\bALTER\s+DATABASE\b|\bALTER\s+(?:USER|ROLE)\b"
+    r"|\bDROP\b|\bTRUNCATE\b|\bDELETE\s+FROM\b",
+    re.I)
+
+
+def _cross_project_op(text: str) -> str | None:
+    """The CPS command-category a ticket NAMES (or None). Pure text, command-/client-anchored."""
+    if _XP_SERVICE_CTL_RE.search(text):
+        return "service-control"
+    if _XP_HOST_CTL_RE.search(text):
+        return "host-control"
+    if _XP_DB_CLIENT_RE.search(text) and _XP_SQL_DDL_RE.search(text):
+        return "database-ddl"
+    return None
 
 
 def _matches(patterns, text) -> bool:
@@ -93,6 +137,25 @@ def classify(ticket_text: str, *, unattended: bool, has_safety_net: bool,
         if action is not None:
             return Decision(action, f"operator classification override: {action.value}",
                             category="operator_override")
+
+    # Cross-project / irreversible OP named in the ticket (service/host/db state-change).
+    # UNATTENDED-ONLY on purpose: the CPS hook hard-denies these when no human can answer its
+    # confirm. Parking proactively surfaces the ticket for a per-action Rule #11 grant BEFORE the
+    # run wastes an attempt on a mid-run deny. In ATTENDED mode we do NOT pre-park — the human is
+    # present and CPS's confirm-gate lets them approve it live, so deferring would be needlessly
+    # conservative. (Unlike the blast-radius hard-PARK categories below, which defer regardless of
+    # mode; this category's whole rationale is "can't ask unattended", so it is mode-gated.)
+    if unattended:
+        xp = _cross_project_op(text)
+        if xp is not None:
+            return Decision(
+                Action.PARK,
+                f"ticket names a cross-project / irreversible op ({xp}); the unattended CPS gate "
+                f"hard-denies it mid-run — it needs a per-action Rule #11 human grant",
+                category=f"cross_project_op:{xp}", foundational=True,
+                contamination_scope=ContaminationScope.SERVICE,
+                human_action=f"grant per-action Rule #11 approval for the {xp} op, or split it out of this ticket",
+            )
 
     # Hard-PARK categories: high blast-radius regardless of how 'reversible' it looks.
     for cat, (pattern, foundational, scope) in HARD_PARK_CATEGORIES.items():

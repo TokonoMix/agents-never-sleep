@@ -146,7 +146,7 @@ class Orchestrator:
             ticket_id=ticket.id, state=state, why=decision.why,
             category=field_or_blank(decision, "category"),
             attempted="classified before implementation",
-            human_action_required=f"decide: {ticket.title}",
+            human_action_required=(getattr(decision, "human_action", "") or f"decide: {ticket.title}"),
             contamination_scope=decision.contamination_scope,
         )
         self.store.write(outcome)
