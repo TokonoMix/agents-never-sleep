@@ -10,6 +10,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-16
+
+Two backward-compatible additions (MINOR): a proactive cross-project-op PARK in the classifier, so
+an unattended run surfaces a Rule&nbsp;#11 grant instead of hitting a mid-run hard-deny; and a
+one-command installer for the local pre-commit redaction hook.
+
 ### Added
 - **Proactive cross-project-op PARK.** The per-ticket classifier now PARKs an unattended ticket
   that *names* a cross-project / irreversible op (service-control, host-control, or a db-client +
@@ -17,8 +23,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run hitting a mid-run hard-deny from the environment's cross-project safety hook. It mirrors only
   the pure-text command signals of that hook (not its filesystem `foreign-write` path check, which a
   ticket-text classifier cannot see reliably); the hook remains the reactive backstop. Attended runs
-  are unaffected (a human answers the confirm live). Local pre-commit redaction hook now also ships a
-  one-command installer (`scripts/install-git-hooks.sh`).
+  are unaffected (a human answers the confirm live).
+- **One-command git-hook installer.** `scripts/install-git-hooks.sh` installs the local pre-commit
+  redaction hook (idempotent, worktree-aware); `acceptance/test_precommit_redaction.py` proves it
+  blocks a leak. CI remains the authoritative gate.
 
 ## [1.7.1] — 2026-07-15
 
