@@ -19,7 +19,8 @@ sys.path.insert(0, SKILL_ROOT)
 
 from agents_never_sleep.launcher import (  # noqa: E402
     WorktreeError, ans_worktree_root, cleanup_isolated_worktree,
-    create_isolated_worktree, should_isolate,
+    create_isolated_worktree, resolve_live_tree_policy, should_isolate,
+    tracked_dirt_count,
 )
 
 
@@ -152,6 +153,58 @@ def test_report_path_honors_env(failures):
         os.environ.pop("UE_REPORT_PATH", None)
 
 
+def test_resolve_live_tree_policy_defaults_dirty_detached_to_isolation(failures):
+    """The default-upgrade: a DETACHED (not --fg) run on a DIRTY, non-linked primary tree gets
+    auto_worktree by default, so an unattended run can never clobber a human's uncommitted work
+    (the field incident). Clean / --fg / already-linked / explicit-opt-out are NOT upgraded."""
+    # dirty + detached + not linked, no explicit policy -> isolate
+    for configured in ("warn", "", None, "   ", "banana"):
+        got = resolve_live_tree_policy(configured, is_dirty=True, is_foreground=False, is_linked=False)
+        if got != "auto_worktree":
+            failures.append(f"[policy] dirty+detached+unlinked, configured={configured!r}: "
+                            f"expected auto_worktree, got {got!r}")
+    # explicit operator choices are honored VERBATIM (never silently overridden), case-insensitively
+    for configured, want in (("auto_worktree", "auto_worktree"), ("ack", "ack"),
+                             ("require_isolation", "require_isolation"),
+                             ("Auto_Worktree", "auto_worktree"), ("ACK", "ack")):
+        got = resolve_live_tree_policy(configured, is_dirty=True, is_foreground=False, is_linked=False)
+        if got != want:
+            failures.append(f"[policy] explicit {configured!r}: expected {want!r}, got {got!r}")
+    # NO upgrade when it would be wrong or unsupported:
+    if resolve_live_tree_policy("warn", is_dirty=False, is_foreground=False, is_linked=False) != "warn":
+        failures.append("[policy] clean tree must NOT upgrade to isolation")
+    if resolve_live_tree_policy("warn", is_dirty=True, is_foreground=True, is_linked=False) != "warn":
+        failures.append("[policy] --fg must NOT upgrade (auto_worktree is unsupported under --fg)")
+    if resolve_live_tree_policy("warn", is_dirty=True, is_foreground=False, is_linked=True) != "warn":
+        failures.append("[policy] an already-linked worktree must NOT re-isolate (never nest)")
+    # 'ack' is the explicit opt-out even on a dirty detached tree
+    if resolve_live_tree_policy("ack", is_dirty=True, is_foreground=False, is_linked=False) != "ack":
+        failures.append("[policy] 'ack' must remain the operator's opt-out from auto-isolation")
+
+
+def test_tracked_dirt_count_ignores_untracked(failures):
+    """The default-upgrade keys on TRACKED dirt (modified/staged/deleted) — the state a drain-restore
+    would clobber. UNTRACKED files (build output, scratch, harness scaffolding) survive a git revert,
+    so they must NOT trigger isolation, or every repo with a stray file would force a worktree."""
+    repo = _repo()
+    if tracked_dirt_count(repo) != 0:
+        failures.append("[dirt] a freshly-committed clean tree must report 0 tracked dirt")
+    # untracked file -> still 0 (git revert never clobbers it)
+    with open(os.path.join(repo, "scratch.log"), "w") as fh:
+        fh.write("noise\n")
+    if tracked_dirt_count(repo) != 0:
+        failures.append("[dirt] an untracked file must not count as tracked dirt")
+    # modify a TRACKED file -> counts (this is the incident: a modified tracked settings file)
+    with open(os.path.join(repo, "app.py"), "a") as fh:
+        fh.write("print('edit')\n")
+    if tracked_dirt_count(repo) < 1:
+        failures.append("[dirt] a modified tracked file must count as tracked dirt")
+    # staged change also counts (index differs from HEAD -> revert would drop it)
+    _git(repo, "add", "app.py")
+    if tracked_dirt_count(repo) < 1:
+        failures.append("[dirt] a staged tracked change must count as tracked dirt")
+
+
 def test_create_on_non_repo_raises(failures):
     junk = tempfile.mkdtemp(prefix="ue-g4b-nonrepo-")
     try:
@@ -169,6 +222,8 @@ def main() -> int:
     test_create_force_removes_a_leftover(failures)
     test_cleanup_removes_dirty_worktree_but_keeps_branch(failures)
     test_report_path_honors_env(failures)
+    test_resolve_live_tree_policy_defaults_dirty_detached_to_isolation(failures)
+    test_tracked_dirt_count_ignores_untracked(failures)
     test_create_on_non_repo_raises(failures)
     print("=" * 60)
     if failures:
