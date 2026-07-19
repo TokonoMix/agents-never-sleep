@@ -46,6 +46,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from .agent_clis import (AGENT_CLIS, cli_for_argv, is_allowlisted,
@@ -108,6 +109,39 @@ def _is_linked_worktree(repo: str) -> bool:
         p = p.strip()
         return p if os.path.isabs(p) else os.path.join(repo, p)
     return os.path.realpath(_abs(gd.stdout)) != os.path.realpath(_abs(cd.stdout))
+
+
+def tracked_dirt_count(repo: str) -> int:
+    """Number of TRACKED working-tree/index changes (modified, staged, or deleted) — the state a
+    drain-restore (git revert/checkout to a ref) would CLOBBER. UNTRACKED files (`??`) are excluded on
+    purpose: a git revert never touches them, so they carry no clobber risk and must not force
+    isolation (else any repo with a stray log/build artifact would be treated as 'dirty'). This is the
+    signal that drives the auto-isolation default — it keys precisely on the field incident (a human's
+    modified, uncommitted tracked file being reverted). Returns 0 on any git error (fail toward the
+    non-upgrading default; the explicit live_tree policy still governs)."""
+    r = _wt_git(repo, "status", "--porcelain")
+    if r.returncode != 0:
+        return 0
+    # A valid porcelain entry is "XY PATH" (>=4 chars); require >=3 so a truncated/blank line can never
+    # be misread as tracked dirt. Untracked ("??") is the only 2-char status we deliberately exclude.
+    return sum(1 for line in r.stdout.splitlines() if len(line) >= 3 and line[:2] != "??")
+
+
+def resolve_live_tree_policy(configured, *, is_dirty: bool, is_foreground: bool,
+                             is_linked: bool) -> str:
+    """Resolve the EFFECTIVE autonomy.live_tree policy, applying the default-upgrade that protects a
+    human's uncommitted work. An explicit operator choice (auto_worktree / ack / require_isolation) is
+    honored VERBATIM — never silently overridden. Otherwise (unset / 'warn' / unknown), a DETACHED run
+    on a DIRTY, non-linked primary tree defaults to auto_worktree so an unattended run can never revert
+    the human's changes in place (the 2026-07-19 incident). A clean tree, a foreground (--fg) run
+    (where auto_worktree is unsupported — this process execs into the agent), or an already-linked
+    worktree are left at 'warn' (no upgrade)."""
+    p = configured.strip().lower() if isinstance(configured, str) else ""
+    if p in ("auto_worktree", "ack", "require_isolation"):
+        return p                       # explicit operator choice — honor verbatim
+    if is_dirty and not is_foreground and not is_linked:
+        return "auto_worktree"         # detached + dirty default -> isolate (protect uncommitted work)
+    return "warn"
 
 
 def ans_worktree_root(primary_repo: str) -> str:
@@ -907,6 +941,90 @@ def compose_watchdog_argv(full_argv, heartbeat_path, wd_cfg, per_ticket_timeout_
     return argv + ["--"] + list(full_argv)
 
 
+def _claude_json_path() -> str:
+    """Location of Claude Code's per-user config (~/.claude.json), overridable via ANS_CLAUDE_JSON for
+    tests (parallel to ANS_TRUST_STORE) so the suite never touches the real home file."""
+    return os.environ.get("ANS_CLAUDE_JSON") or os.path.expanduser("~/.claude.json")
+
+
+def ensure_workspace_trusted(repo: str) -> None:
+    """Preflight: mark `repo` as a TRUSTED workspace in ~/.claude.json so Claude Code honours the
+    project's allow-list instead of raising an interactive 'do you trust this folder?' dialog on the
+    first tool call — which HANGS an unattended run (no human is present to click 'trust', so every
+    permission prompt blocks forever). This is the field failure where a whole night's run stalled on
+    an unanswered prompt.
+
+    Contract: ADDITIVE and IDEMPOTENT — only the target path's `hasTrustDialogAccepted` flag is set
+    true; every other project entry and field is preserved byte-for-byte. Writes atomically (temp +
+    rename, 0600) and only when a change is actually needed. FAIL-SAFE: any error (missing/creatable
+    file, malformed JSON, unwritable home) is logged and swallowed — a trust-write must NEVER abort or
+    crash a launch. When the file is absent it is created pre-trusted (else Claude Code would create it
+    and show the dialog); when it is present but unparseable it is left UNTOUCHED (never clobber a
+    file we cannot safely merge).
+
+    CONCURRENCY: the whole read-modify-write is serialized under an exclusive flock on a sibling
+    lock file, so two ans-run launches racing on ~/.claude.json cannot last-writer-wins away each
+    other's entry. The lock is process-scoped (released on fd close / process death — never stale),
+    and the critical section is a small JSON read+write, so blocking is bounded."""
+    path = _claude_json_path()
+    lock_fd = None
+    try:
+        try:
+            lock_fd = os.open(path + ".ans-lock", os.O_CREAT | os.O_WRONLY, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError:
+            lock_fd = None  # best-effort: proceed unlocked rather than skip the trust-write
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"  trust: ~/.claude.json is unreadable ({exc}) — leaving it untouched; a "
+                      f"trust dialog may still prompt. Fix the file to auto-trust the workspace.",
+                      file=sys.stderr)
+                return
+            if not isinstance(data, dict):
+                print("  trust: ~/.claude.json is not a JSON object — leaving it untouched.",
+                      file=sys.stderr)
+                return
+        else:
+            data = {}
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            print("  trust: ~/.claude.json 'projects' is not an object — leaving it untouched.",
+                  file=sys.stderr)
+            return
+        entry = projects.get(repo)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+            return  # already trusted — nothing to write (idempotent)
+        if isinstance(entry, dict):
+            entry["hasTrustDialogAccepted"] = True
+        else:
+            projects[repo] = {"hasTrustDialogAccepted": True,
+                              "hasCompletedProjectOnboarding": True}
+        d = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".claude.json.ans-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        print(f"  trust: marked workspace {repo} trusted in ~/.claude.json "
+              "(so no interactive trust dialog can hang an unattended run)")
+    except Exception as exc:  # noqa: BLE001 — a trust-write must never abort a launch
+        print(f"  trust: could not auto-trust the workspace ({exc}) — continuing; a trust dialog "
+              "may prompt on the first tool call.", file=sys.stderr)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)  # releases the flock
+
+
 def main() -> int:
     # Subcommand dispatch: `ans-run init ...` / `ans-run install-hooks ...` are recognised
     # subcommands, routed BEFORE the default prompt path (where an unknown first arg becomes
@@ -961,6 +1079,11 @@ def main() -> int:
             return reexec_as_target_user(target)  # returns only on failure
 
     print(f"== ANS preflight — repo: {repo} ==")
+    # Auto-trust the workspace so Claude Code never raises an interactive folder-trust dialog that
+    # would hang this unattended run (fail-safe; never aborts a launch). Skipped under --check, which
+    # is a side-effect-free dry run.
+    if not args.check:
+        ensure_workspace_trusted(repo)
     rep = Report()
     cfg, config_exists, cfg_digest, full_config = load_launcher_config(repo, rep)
 
@@ -1055,6 +1178,22 @@ def main() -> int:
     # under --fg: exec replaces this process, leaving no place to clean up.
     primary_repo = repo
     worktree = None
+    # Default-upgrade (2026-07-19): a DETACHED run on a DIRTY, non-linked primary tree isolates by
+    # default so an unattended run can never revert a human's uncommitted work in place (the field
+    # incident that reverted a modified .claude/settings.json). An explicit live_tree (auto_worktree/
+    # ack/require_isolation) is honored verbatim; --fg / clean / already-linked are never upgraded.
+    _autonomy = full_config.setdefault("autonomy", {})
+    _configured_policy = _autonomy.get("live_tree")
+    _effective_policy = resolve_live_tree_policy(
+        _configured_policy,
+        is_dirty=tracked_dirt_count(primary_repo) > 0,
+        is_foreground=args.fg,
+        is_linked=_is_linked_worktree(primary_repo))
+    # Announce ONLY a real auto-isolation upgrade (a normalizing None->'warn' is silent).
+    if _effective_policy == "auto_worktree" and _configured_policy != "auto_worktree":
+        print(f"  live-tree: dirty detached tree — isolating by default (autonomy.live_tree "
+              f"{_configured_policy!r} -> 'auto_worktree'); set 'ack' to opt out")
+    _autonomy["live_tree"] = _effective_policy
     if should_isolate(full_config, primary_repo):
         if args.fg:
             # Fail-closed (matches the doctrine below): the operator asked for isolation, so running
@@ -1079,6 +1218,16 @@ def main() -> int:
         # (open_log below), so the operator finds both where they expect them.
         report_name = (full_config.get("report") or {}).get("local_path") or "night-report.md"
         child_env["UE_REPORT_PATH"] = os.path.join(primary_repo, report_name)
+        # Pin the run-incomplete SENTINEL to the isolated worktree, parallel to the report path (and to
+        # UE_SESSION_BUDGET_MARKER, pinned in run_fresh_session_loop). The fresh-session supervisor
+        # checks the sentinel at a worktree-relative path; the child driver + Stop-hook resolve it from
+        # ${UE_RUN_INCOMPLETE:-<--repo|$PWD>/...}. Without this pin, a child launched with --repo != its
+        # CWD (the cron/claude-run case that _sentinel_path_ok guards) would write/read the sentinel on
+        # the PRIMARY tree while the supervisor watches the worktree — the loop then mis-detects a
+        # terminal after ONE session and never-stop collapses. Pinning here makes all three agree on ONE
+        # absolute sentinel inside the worktree, for every detached spawn path (fresh-session loop,
+        # watchdog, bare Popen) since they all derive from child_env.
+        child_env["UE_RUN_INCOMPLETE"] = os.path.join(worktree, ".unattended", "run-incomplete")
         print(f"  isolated: session runs in a dedicated git worktree — {worktree}")
         print(f"  report:   {child_env['UE_REPORT_PATH']} (kept on your primary tree)")
 

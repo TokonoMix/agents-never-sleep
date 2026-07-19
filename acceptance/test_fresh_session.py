@@ -42,7 +42,8 @@ TRUST_STORE = os.path.join(TRUST_DIR, "trusted.json")
 
 
 # --------------------------------------------------------------------------- launcher helpers
-def _new_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
+def _new_repo(agent_script: str, launcher_extra: dict | None = None,
+              config_extra: dict | None = None) -> str:
     repo = tempfile.mkdtemp(prefix="ue-fresh-")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
@@ -66,8 +67,10 @@ def _new_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
     launcher.update(launcher_extra or {})
     cfg_dir = os.path.join(repo, ".claude")
     os.makedirs(cfg_dir, exist_ok=True)
+    full_cfg = {"launcher": launcher}
+    full_cfg.update(config_extra or {})
     with open(os.path.join(cfg_dir, "agents-never-sleep.json"), "w") as fh:
-        json.dump({"launcher": launcher}, fh)
+        json.dump(full_cfg, fh)
     return repo
 
 
@@ -80,8 +83,9 @@ def _run(repo: str, *extra: str, timeout: int = 30) -> subprocess.CompletedProce
                           stdin=subprocess.DEVNULL)
 
 
-def _trusted_repo(agent_script: str, launcher_extra: dict | None = None) -> str:
-    repo = _new_repo(agent_script, launcher_extra)
+def _trusted_repo(agent_script: str, launcher_extra: dict | None = None,
+                  config_extra: dict | None = None) -> str:
+    repo = _new_repo(agent_script, launcher_extra, config_extra)
     res = _run(repo, "--trust")
     assert res.returncode == 0, f"--trust failed: {res.stdout}{res.stderr}"
     return repo
@@ -366,6 +370,71 @@ def test_on_respawns_until_terminal(failures):
         failures.append("[on] loop ended but sentinel still present")
 
 
+def test_isolation_composes_with_fresh_session(failures):
+    """(f) auto_worktree ⊕ fresh_session_every MUST compose. When the launcher isolates the run in a
+    dedicated worktree, the fresh-session supervisor checks the run-incomplete sentinel at a
+    worktree-relative path — so the child driver MUST write the SAME path across respawns, or the
+    supervisor mis-detects a terminal state after ONE session and the never-stop loop collapses.
+
+    The fix pins UE_RUN_INCOMPLETE (parallel to UE_SESSION_BUDGET_MARKER) so the driver, the Stop-hook
+    and the supervisor all agree on one absolute sentinel under the worktree — authoritative even for
+    the cron/claude-run case where the child's --repo would otherwise differ from its CWD.
+
+    The fake agent faithfully models a real driver that resolves the sentinel from
+    ${UE_RUN_INCOMPLETE:-<--repo>/...} where --repo is the PRIMARY tree (the exact cwd!=--repo case the
+    driver's _sentinel_path_ok guards). Without the pin the sentinel lands on the primary and the
+    supervisor's worktree check never sees it -> 1 spawn (RED). With the pin it lands in the worktree
+    -> 3 spawns and a clean terminal (GREEN)."""
+    sentinel_rel = ".unattended/run-incomplete"
+    agent_script = (
+        "#!/bin/sh\n"
+        'echo "spawn budget=${UE_SESSION_TICKET_BUDGET:-UNSET} ue=${UE_RUN_INCOMPLETE:-UNSET} cwd=$PWD"'
+        ' >> "$REPO/spawns.log"\n'
+        'n=$(cat "$REPO/round" 2>/dev/null || echo 0)\n'
+        'n=$((n + 1))\n'
+        'echo "$n" > "$REPO/round"\n'
+        # A faithful driver: honour the pinned sentinel path; else fall back to the PRIMARY --repo it
+        # was launched with (REPO=primary here) — modelling cwd != --repo, which is exactly the case
+        # the pin has to fix.
+        f'S="${{UE_RUN_INCOMPLETE:-$REPO/{sentinel_rel}}}"\n'
+        'mkdir -p "$(dirname "$S")"\n'
+        'if [ "$n" -ge 3 ]; then rm -f "$S"; else : > "$S"; fi\n'
+        "exit 0\n"
+    )
+    repo = _trusted_repo(agent_script, {"fresh_session_every": 2},
+                         {"autonomy": {"live_tree": "auto_worktree"}})
+    # Seed the sentinel in the primary so a naive (broken) supervisor would still see "work remaining"
+    # there; the point is the ISOLATED supervisor must not be fooled into stopping after one session.
+    os.makedirs(os.path.join(repo, ".unattended"), exist_ok=True)
+    open(os.path.join(repo, sentinel_rel), "w").close()
+
+    env = dict(os.environ, ANS_TRUST_STORE=TRUST_STORE, ANS_TEST_MODE="1", REPO=repo)
+    res = subprocess.run([sys.executable, ANS_RUN, "--repo", repo, "go"],
+                         capture_output=True, text=True, timeout=90, env=env,
+                         stdin=subprocess.DEVNULL)
+    if res.returncode != 0:
+        failures.append(f"[compose] expected rc 0, got {res.returncode}: {res.stdout}{res.stderr}")
+        return
+    if "isolated: session runs in a dedicated git worktree" not in res.stdout:
+        failures.append(f"[compose] run was NOT isolated in a worktree: {res.stdout}")
+    if "Fresh-session loop done after 3 session(s)" not in res.stdout:
+        failures.append(f"[compose] isolation broke the respawn loop (expected 3 sessions): {res.stdout}")
+    spawns = os.path.join(repo, "spawns.log")
+    lines = [ln for ln in open(spawns).read().splitlines() if ln.strip()] if os.path.exists(spawns) else []
+    if len(lines) != 3:
+        failures.append(f"[compose] expected 3 spawns under isolation, got {len(lines)}: {lines}")
+    # Every spawn must carry a PINNED sentinel that lives inside the worktree, never the primary tree —
+    # that is the invariant the fix establishes.
+    for ln in lines:
+        ue = ln.split("ue=", 1)[1].split(" ", 1)[0] if "ue=" in ln else "UNSET"
+        if ue == "UNSET":
+            failures.append(f"[compose] UE_RUN_INCOMPLETE was NOT pinned into the child env: {ln}")
+        elif os.path.realpath(ue).startswith(os.path.realpath(repo) + os.sep):
+            failures.append(f"[compose] pinned sentinel points into the PRIMARY tree, not the worktree: {ue}")
+        elif not ue.endswith(sentinel_rel):
+            failures.append(f"[compose] pinned sentinel has an unexpected name: {ue}")
+
+
 def main() -> int:
     failures = []
     test_default_off_single_spawn(failures)
@@ -375,6 +444,7 @@ def main() -> int:
     test_below_budget_keeps_going(failures)
     test_counter_resets_per_session(failures)
     test_on_respawns_until_terminal(failures)
+    test_isolation_composes_with_fresh_session(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — fresh-session feature / default-off guarantee not proven")
