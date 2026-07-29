@@ -47,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 
 from .agent_clis import (AGENT_CLIS, cli_for_argv, is_allowlisted,
                          is_noninteractive_permission)
@@ -895,9 +896,11 @@ def compose_watchdog_argv(full_argv, heartbeat_path, wd_cfg, per_ticket_timeout_
     iters = int(fix_iterations if fix_iterations is not None else 3)
     default_stale = budget * (iters + 1) + 1800   # + 30min review/consensus margin
     stale = int(wd_cfg.get("stale_s") or default_stale)
+    early_stale = int(wd_cfg.get("early_stale_s", 1200))
     argv = [sys.executable, "-m", "agents_never_sleep.watchdog",
             "--heartbeat", heartbeat_path,
             "--stale", str(stale),
+            "--early-stale", str(early_stale),
             "--max-restarts", str(int(wd_cfg.get("max_restarts", 3))),
             "--poll", str(int(wd_cfg.get("poll_s", 30))),
             "--grace", str(int(wd_cfg.get("grace_s", 300)))]
@@ -1047,6 +1050,23 @@ def main() -> int:
             return EX_NOGO
 
     full_argv = agent_argv + args.prompt
+
+    # Direction 2 (INT-2674): give this child a unique run-token so it can reliably
+    # self-identify during a process check. The tree-flock already guarantees ≤1 live
+    # runner per repo, so a same-token match is DEFINITIVELY this child — not a stranger.
+    # Token goes into the prompt (visible in /proc/<pid>/cmdline) and into UE_ANS_RUN_TOKEN
+    # (visible in the child's env). Both channels are set HERE, upstream of every spawn
+    # branch (--fg exec, fresh-session loop, watchdog-wrapped, and bare Popen), so no
+    # combination of flags can omit it — same pattern as the M1 CLAUDE_UNATTENDED hardening.
+    run_token = str(uuid.uuid4())
+    child_env["UE_ANS_RUN_TOKEN"] = run_token
+    if full_argv:
+        full_argv[-1] = full_argv[-1] + (
+            f"\n\n[run-token] Your unique ANS run-token is {run_token} (also in env "
+            f"UE_ANS_RUN_TOKEN). The tree-flock guarantees at most one live runner per "
+            f"repo — so if a process check finds a claude process or watchdog that carries "
+            f"this exact token in its command-line or environment, that IS yourself. "
+            f"Do not treat it as a competing worker; start the next→complete loop immediately.")
 
     # G4b: auto-worktree isolation. When autonomy.live_tree == "auto_worktree", run the whole session
     # in a dedicated EXTERNAL git worktree so the primary/live tree is never touched. The lock stays

@@ -64,6 +64,12 @@ def main(argv=None) -> int:
     ap.add_argument("--alert-timeout", type=int, default=30,
                     help="hard timeout for the --alert command so giving up can't itself hang")
     ap.add_argument("--grace", type=int, default=300, help="startup grace before staleness counts")
+    ap.add_argument("--early-stale", type=int, default=1200,
+                    help="seconds after grace within which the child MUST produce its first "
+                         "heartbeat (time-to-first-beat); 0 disables the check. Catches a "
+                         "startup stall (e.g. a process-check loop) before the full --stale "
+                         "window (typically 3h) would fire. Safe: a healthy child beats within "
+                         "seconds of boot; only a child that never called next() triggers this.")
     ap.add_argument("command", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
     cmd = args.command[1:] if args.command and args.command[0] == "--" else args.command
@@ -106,6 +112,7 @@ def main(argv=None) -> int:
         # lets us reap a crashed agent's orphaned MCP servers.
         last_tree: list = []
         last_snap = 0.0
+        early_stale_checked = False  # fires at most once per child lifetime
         while True:
             rc = proc.poll()
             if rc is not None:
@@ -120,6 +127,27 @@ def main(argv=None) -> int:
             if now - last_snap >= args.poll:
                 last_snap = now
                 last_tree = descendants(proc.pid)
+            # Direction 3 (INT-2674): time-to-first-beat early-stale check.
+            # A healthy child calls next() within seconds of boot and writes its first heartbeat
+            # immediately. A startup-stalled child (e.g. stuck in a process-check loop or waiting
+            # on user input) never beats at all, so the heartbeat file either doesn't exist or still
+            # holds the PREVIOUS run's timestamp (predates `started`). We detect this by checking
+            # whether the last-beat age exceeds the child's own lifetime: age > (now - started) ↔
+            # beat_ts < started ↔ this child has not yet written a single beat.
+            # The check fires once, after grace + early_stale seconds, so a slow boot (e.g. a long
+            # preflight probe) still has the full grace window before we conclude it is stuck.
+            if (args.early_stale > 0 and not early_stale_checked
+                    and now - started >= args.grace + args.early_stale):
+                early_stale_checked = True
+                age = Heartbeat.age_seconds(args.heartbeat)
+                child_age = now - started
+                if age is None or age > child_age:
+                    shown = "no heartbeat" if age is None else f"{age:.0f}s"
+                    print(f"watchdog: startup stall — no heartbeat from child within "
+                          f"{args.early_stale}s after grace ({shown} > {child_age:.0f}s) "
+                          f"— restarting early", file=sys.stderr)
+                    _terminate(proc)
+                    break
             if now - started >= args.grace and now - last_stale_check >= args.poll:
                 last_stale_check = now
                 age = Heartbeat.age_seconds(args.heartbeat)

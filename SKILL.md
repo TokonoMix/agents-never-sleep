@@ -621,6 +621,24 @@ stale (the hang the Stop-hook can't see), and on exhausted restarts alerts + exi
 with `claude-run` is **opt-in composition** (wrap the call; see `WATCHDOG.md`) — never a rewrite of
 that shared wrapper.
 
+Two hardening additions (INT-2674, 2026-07-29):
+
+**Run-token** (Direction 2): the launcher generates a UUID per launch and injects it into every
+spawn path — into the prompt's last argv element (visible in `/proc/<pid>/cmdline`) and into
+`UE_ANS_RUN_TOKEN` in the child's environment. A chained worker that does a startup process check
+and finds a `claude` process carrying this exact token is looking at ITSELF — the tree-flock already
+guarantees ≤1 live runner per repo, so a same-token match is definitively self-identification.
+The prompt note instructs the worker to ignore it and start the `next→complete` loop immediately.
+
+**Early-stale detector** (Direction 3): `watchdog.py` now accepts `--early-stale <seconds>`
+(default `1200`, configurable via `launcher.watchdog.early_stale_s`). After `grace + early_stale`
+seconds, the watchdog checks whether the heartbeat timestamp predates the child's own start time
+(`age > child_lifetime` → `beat_ts < started` → child has never called `next()`). If so, it
+declares a startup stall and restarts early. A healthy child writes its first beat within seconds of
+boot; only a startup-stalled child (stuck in a process-check loop, waiting on user input, etc.)
+triggers this. The check fires once per child lifetime and never interferes with long ticket
+implementations that genuinely take 30–90 minutes between beats.
+
 Vault as a key source is built: a `token_ref` of `env:VAR` or `vault:<mount>/<path>[#field]` (the
 form the wizard already writes) resolves the Paperclip token and tokonomix key from env or the configured
 Vault (AppRole / `VAULT_TOKEN`, KV-v2), registers the resolved value with the redaction layer, and

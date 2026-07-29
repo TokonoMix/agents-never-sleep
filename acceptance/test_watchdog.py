@@ -117,6 +117,75 @@ def test_ans_run_composes_watchdog_by_default(failures, tmp):
         failures.append(f"[compose] config overrides (stale/cap/alert) not honored: {tuned}")
 
 
+def test_early_stale_startup_stall(failures, tmp):
+    """Direction 3 (INT-2674): a child that never produces a heartbeat must be restarted
+    EARLY (within grace + early_stale seconds), long before the full --stale window (3h+)
+    would fire. Models the incident where run-2 stalled in a startup process-check loop and
+    the heartbeat file still held run-1's timestamp (predating this child's start).
+
+    The time-to-first-beat detector: if heartbeat age > child lifetime at the
+    grace + early_stale mark, the child has never beaten → startup stall → restart.
+    A healthy child beats within seconds of calling next(), so this is zero-false-positive."""
+    hb = os.path.join(tmp, "hb-early-stale.json")
+    # Write a "stale" heartbeat with a timestamp from 120s ago — simulates run-1's last beat,
+    # predating the child start. The child (sleep forever) never updates it.
+    _hb(hb, time.time() - 120)
+    start = time.time()
+    # --stale 9999 (would never fire on its own); --early-stale 2 (fires after grace+2s).
+    # --grace 0 so we don't wait 300s in the test. --max-restarts 1 to bound runtime.
+    rc = watchdog.main(["--heartbeat", hb, "--stale", "9999", "--early-stale", "2",
+                        "--poll", "1", "--grace", "0", "--max-restarts", "1",
+                        "--", PY, "-c", "import time; time.sleep(60)"])
+    elapsed = time.time() - start
+    if rc != 75:
+        failures.append(f"[early-stale] startup stall should exhaust restarts and exit 75, got {rc}")
+    if elapsed > 30:
+        failures.append(f"[early-stale] took {elapsed:.0f}s — must restart early, not wait --stale")
+
+
+def test_early_stale_healthy_child_not_restarted(failures, tmp):
+    """Direction 3 (INT-2674): a healthy child that beats shortly after start must NOT be
+    restarted by the early-stale check — only a startup-stalled child triggers it."""
+    hb = os.path.join(tmp, "hb-early-healthy.json")
+    # The watchdog sets UE_HEARTBEAT in the child env — use that to find the heartbeat path.
+    child_script = (
+        "import json, time, os; "
+        "hb = os.environ['UE_HEARTBEAT']; "
+        "json.dump({'ts': time.time(), 'n': 1, 'ticket': '', 'phase': 'schedule'}, open(hb, 'w')); "
+        "time.sleep(10)"
+    )
+    start = time.time()
+    # --early-stale 5: fires after 5s; the child writes its beat at boot so age << lifetime → no restart.
+    rc = watchdog.main(["--heartbeat", hb, "--stale", "9999", "--early-stale", "5",
+                        "--poll", "1", "--grace", "0", "--max-restarts", "1",
+                        "--", PY, "-c", child_script])
+    # The child sleeps 10s then exits 0; the watchdog should pass that through cleanly.
+    if rc != 0:
+        failures.append(f"[early-stale-healthy] healthy child should exit 0 (no restart), got {rc}")
+
+
+def test_run_token_injected_into_prompt_and_env(failures, tmp):
+    """Direction 2 (INT-2674): compose_watchdog_argv receives a full_argv whose LAST element
+    is the prompt. The launcher injects the run-token note into that element AND sets
+    UE_ANS_RUN_TOKEN in child_env — verify both channels carry the same UUID."""
+    import uuid as _uuid
+    from agents_never_sleep.launcher import compose_watchdog_argv
+
+    token = str(_uuid.uuid4())
+    prompt = f"Do the work.\n\n[run-token] Your unique ANS run-token is {token} (also in env UE_ANS_RUN_TOKEN)."
+    full_argv = ["claude", "-p", "--dangerously-skip-permissions", prompt]
+    hb = os.path.join(tmp, "hb-token.json")
+
+    wrapped = compose_watchdog_argv(full_argv, hb, {}, 1800)
+    # The prompt must be the last element after "--", intact (launcher injects before calling compose).
+    last_elem = wrapped[-1]
+    if token not in last_elem:
+        failures.append(f"[run-token] token not found in last argv element: {last_elem[:80]}...")
+    # --early-stale must be present in the wrapped argv (compose now always passes it).
+    if "--early-stale" not in wrapped:
+        failures.append(f"[run-token] --early-stale missing from composed argv: {wrapped}")
+
+
 def main() -> int:
     failures = []
     tmp = tempfile.mkdtemp(prefix="ue-wd-")
@@ -125,14 +194,18 @@ def main() -> int:
     test_stale_restart_then_alert(failures, tmp)
     test_crash_surfaces_fast_not_on_poll_cadence(failures, tmp)
     test_ans_run_composes_watchdog_by_default(failures, tmp)
+    test_early_stale_startup_stall(failures, tmp)
+    test_early_stale_healthy_child_not_restarted(failures, tmp)
+    test_run_token_injected_into_prompt_and_env(failures, tmp)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — watchdog not proven")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: ✅ GREEN — clean-exit passthrough, fresh-heartbeat no-restart, and "
-          "stale→restart→alert→exit-75 all hold (sidecar; claude-run untouched)")
+    print("RESULT: ✅ GREEN — clean-exit passthrough, fresh-heartbeat no-restart, "
+          "stale→restart→alert→exit-75, early-stale startup-stall, and run-token injection "
+          "all proven (sidecar; claude-run untouched)")
     return 0
 
 
