@@ -10,6 +10,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Council blind-spot surfacing in the run report** (`report.council_blind_spots`). A run that
+  loses its cross-vendor review no longer looks like a run that had one. Two deterministic
+  signals, both rendered as a **BLIND SPOT** banner above the summary:
+  (1) **2+ consecutive `council:error` outcomes** — the footprint of a worker generalising a
+  transient gateway failure across the rest of the backlog, detected in RECORDING order
+  (`updated_at`) rather than the filename order `OutcomeStore.all()` returns; and
+  (2) **`council_calls > 0` with `council_cost_eur == 0.0`** — calls counted but nothing charged,
+  which cannot both be true and means the per-run €-brake is being fed a fiction.
+  Wired into both the terminal report (`driver._terminate`, snapshotting progress BEFORE the
+  reset zeroes it) and the manual `report` subcommand. Fail-safe: a missing or malformed progress
+  file costs the cost signal only, never the report.
+- **SKILL.md**: the council-degradation rule now states explicitly that a failure is per-CALL and
+  never per-RUN — retry ≥2× within the ticket with backoff, log the HTTP status per attempt, and
+  convene again with a clean slate on the next ticket. Only the harness's own
+  `council: {disabled}` (budget brake) may disable councils run-wide.
+
+  Motivating incident: 2026-07-29, einstein-saas "betaal-fundament" run — a transient 502 on
+  tickets 1–2 led the worker to conclude the gateway was down; from ticket 4 it stopped trying.
+  The gateway answered normally minutes later. Eight diffs merged with no cross-vendor review
+  while the report read as if they had been reviewed.
+
 ## [1.8.0] — 2026-07-16
 
 Two backward-compatible additions (MINOR): a proactive cross-project-op PARK in the classifier, so

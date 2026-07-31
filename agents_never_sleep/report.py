@@ -40,6 +40,73 @@ _LOW_YIELD = {
 }
 
 
+def council_blind_spots(outcomes: list, progress: dict | None) -> list:
+    """Run-level council blind spots, derived DETERMINISTICALLY from what the run recorded.
+
+    INT-2658: a transient gateway 502 on the first ticket made a worker conclude the gateway was
+    down for the whole run and stop convening councils entirely from ticket 4 on. The gateway was
+    provably fine minutes later. The run report said the backlog finished; the fact that the
+    compensating cross-vendor review had been off for two thirds of it was only visible by reading
+    every per-ticket `review_coverage` field by hand.
+
+    Two signals the harness can see without calling any LLM:
+
+      1. **A RUN of consecutive council errors.** One error is a transient upstream hiccup and
+         needs no banner. Two or more IN A ROW is the footprint of generalisation — the worker
+         caching a negative result across tickets — which is exactly the failure mode. Reported in
+         RECORDING order (`updated_at`), not filename order, because `OutcomeStore.all()` sorts by
+         filename and a backlog whose ids don't sort in processing order would otherwise show a
+         run that never happened.
+      2. **`council_calls > 0` while `council_cost_eur == 0.0`.** Calls were counted but nothing
+         was charged. Those two cannot both be true, so at least one is not what it claims — the
+         €-cap brake reads the same number, so a silent contradiction here also means the brake is
+         being fed a fiction.
+
+    Fail-safe by construction: a missing/garbage `progress` degrades to "no cost signal" and never
+    raises — a report that crashes on its own diagnostics is worse than one missing a banner.
+    """
+    notes: list = []
+
+    ordered = sorted(outcomes or [], key=lambda o: (getattr(o, "updated_at", 0.0) or 0.0))
+    best_len, best_first, best_last = 0, None, None
+    cur_len, cur_first = 0, None
+    for o in ordered:
+        if "council:error" in (o.review_coverage or ""):
+            cur_len += 1
+            if cur_len == 1:
+                cur_first = o.ticket_id
+            if cur_len > best_len:
+                best_len, best_first, best_last = cur_len, cur_first, o.ticket_id
+        else:
+            cur_len, cur_first = 0, None
+    if best_len >= 2:
+        notes.append(
+            f"COUNCIL OFF FOR {best_len} CONSECUTIVE TICKET(S) ({best_first} → {best_last}) — "
+            "the cross-vendor review that compensates for the PROCEED overrides did not run on "
+            "that stretch, so those diffs are effectively unreviewed no matter what their outcome "
+            "says. A gateway error is TRANSIENT: it must be retried within the ticket and must "
+            "never be cached across tickets (INT-2658). Re-review those diffs in daylight."
+        )
+
+    try:
+        calls = int((progress or {}).get("council_calls", 0) or 0)
+    except (TypeError, ValueError):
+        calls = 0
+    try:
+        cost = float((progress or {}).get("council_cost_eur", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    if calls > 0 and cost == 0.0:
+        notes.append(
+            f"CONTRADICTORY COUNCIL ACCOUNTING — {calls} council call(s) recorded but €0.00 "
+            "charged. Either the councils did not actually run, or their real cost was never "
+            "reported back via --council-cost. The per-run €-brake reads this same number, so it "
+            "is currently being fed a fiction (INT-2658)."
+        )
+
+    return notes
+
+
 def frozen_consent_provenance() -> tuple[dict, list]:
     """The report's ONLY source for consent provenance (t04) — the env vars the launcher froze at
     launch time (UE_CONSENT, UE_CONSENT_AUDIT), NEVER a re-read of the consent store by repo path.

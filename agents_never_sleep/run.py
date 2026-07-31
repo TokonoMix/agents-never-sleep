@@ -34,7 +34,7 @@ from .heartbeat import Heartbeat
 from .ledger import AttemptLedger
 from .orchestrator import Orchestrator
 from .preflight import run_preflight, write_profile
-from .report import build_report, frozen_consent_provenance
+from .report import build_report, council_blind_spots, frozen_consent_provenance
 from .state import OutcomeStore
 from .tickets import load_tickets
 def _resolve_report_path(repo: str, config: dict, args_report: str) -> str:
@@ -582,7 +582,17 @@ def cmd_report(args) -> int:
     except GitError:
         backup_refs = []
     consent_manifest, consent_events = frozen_consent_provenance()
-    report = build_report(ctx.store.all(), run_label="unattended run",
+    outcomes = ctx.store.all()
+    # INT-2658: the manual `report` subcommand must surface the same council blind spots as the
+    # terminal report. Read the progress file directly (fail-safe to {} — an absent/garbage file
+    # only costs the cost-contradiction signal, never the whole report).
+    try:
+        with open(os.path.join(ctx.state_dir, "run-progress.json"), encoding="utf-8") as fh:
+            progress = json.load(fh)
+    except (OSError, ValueError):
+        progress = {}
+    report = build_report(outcomes, run_label="unattended run",
+                          notes=council_blind_spots(outcomes, progress),
                           backup_refs=backup_refs, consent_manifest=consent_manifest,
                           consent_events=consent_events, **_agent_hint_kwargs(ctx))
     with open(ctx.report_path, "w", encoding="utf-8") as fh:

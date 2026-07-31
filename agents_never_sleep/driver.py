@@ -32,7 +32,7 @@ from .fsutil import ensure_private_dir
 from .orchestrator import BAD_STATES, Orchestrator, ProceedToken
 from .vcs import GitError
 from .decide import Action
-from .report import build_report, frozen_consent_provenance
+from .report import build_report, council_blind_spots, frozen_consent_provenance
 from .state import (ContaminationScope, OutcomeState, TERMINAL_SKIP_ON_RESUME,
                     OutcomeStore, TicketOutcome)
 
@@ -700,12 +700,17 @@ class StepDriver:
         # never reaching here — leaves the skip set in place; the continuation resumes with it,
         # which is correct, and the next CLEAN terminal clears it. Known bounded limitation.)
         self._reset_skip()
+        # INT-2658: the council spend/call accounting is a report input, so snapshot it BEFORE the
+        # reset zeroes it — otherwise the zero-cost contradiction check can never see anything but
+        # zeros and the signal is structurally dead.
+        final_progress = self._load_progress()
         self._reset_progress()
         outcomes = self.store.all()
         # Surface run-level blind spots: secret-resolution failures, degraded enforcement on the
         # current platform, then a degraded review.
         from . import capabilities, onboarding
         notes = list(self.key_blind_spots)
+        notes.extend(council_blind_spots(outcomes, final_progress))
         notes.extend(capabilities.report_notes(capabilities.detect_platform()))
         od = onboarding.directive(self.config, interactive=not self.orch.unattended)
         if od and od.get("action") == "degraded":

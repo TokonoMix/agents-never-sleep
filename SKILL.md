@@ -387,6 +387,20 @@ Per ticket, when a `council` block is present:
    errored/timed-out afterward. Unattended: show and continue. Interactive: show and get approval.
 4. **Graceful degradation:** if the council errors / times out / has no key, log it as a blind-spot
    and PROCEED — never stop. Report it as `--council-verdict error`.
+   **A council failure is per-CALL and never per-RUN.** Retry at least twice within the same ticket
+   with a short backoff (e.g. 5s / 15s), logging the HTTP status or error string per attempt into
+   `--review-coverage` so the failure is diagnosable afterwards. If it still fails, mark ONLY that
+   ticket `--council-verdict error` and **convene a council again on the very next ticket with a
+   clean slate**. Never cache a negative outcome across tickets — "the gateway is down for this
+   run" is a conclusion you are not entitled to draw, and it silently removes the compensating
+   control that justifies the PROCEED overrides. The ONLY thing that legitimately disables councils
+   run-wide is the harness returning `council: {disabled: ...}` (budget brake).
+   Why this is spelled out: on 2026-07-29 a worker hit a transient 502 on tickets 1 and 2, concluded
+   the gateway was down, and from ticket 4 on stopped trying — the gateway was provably fine minutes
+   later, and eight diffs went through with no cross-vendor review while the logs read as if they
+   had been reviewed. The harness now detects that footprint (2+ consecutive `council:error`
+   outcomes, and `council_calls > 0` with `€0.00` charged) and raises a **BLIND SPOT** banner at the
+   top of the run report — but detection after the fact is not a substitute for retrying.
 5. **Rate the council call** via `tokonomix_rate_consensus` immediately after acting on the result.
    Submit: `score` (1–10, how useful was the council for THIS ticket decision), `helped_model` (the
    proposer whose view was most decisive, if any), and `outcome` + `findings` real/false counts per
