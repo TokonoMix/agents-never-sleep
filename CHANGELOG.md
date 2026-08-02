@@ -36,7 +36,7 @@ launcher/watchdog hardening against chained-worker self-misidentification and st
   tickets 1–2 led the worker to conclude the gateway was down; from ticket 4 it stopped trying.
   The gateway answered normally minutes later. Eight diffs merged with no cross-vendor review
   while the report read as if they had been reviewed.
-- **Run-token self-identification + early-stale startup detection** (INT-2674). The launcher now
+- **Run-token self-identification + early-stale startup detection**. The launcher now
   generates a UUID per launch and injects it upstream of every spawn path — into the prompt's
   last argv element (visible in `/proc/<pid>/cmdline`) and into the child's `UE_ANS_RUN_TOKEN`
   env — so a chained worker that finds a `claude` process carrying the same token during a

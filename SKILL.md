@@ -635,7 +635,7 @@ stale (the hang the Stop-hook can't see), and on exhausted restarts alerts + exi
 with `claude-run` is **opt-in composition** (wrap the call; see `WATCHDOG.md`) — never a rewrite of
 that shared wrapper.
 
-Two hardening additions (INT-2674, 2026-07-29):
+Two hardening additions (2026-07-29):
 
 **Run-token** (Direction 2): the launcher generates a UUID per launch and injects it into every
 spawn path — into the prompt's last argv element (visible in `/proc/<pid>/cmdline`) and into
