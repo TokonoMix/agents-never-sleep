@@ -10,6 +10,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-08-02
+
+Two backward-compatible additions (MINOR): council blind-spot surfacing in the run report, and
+launcher/watchdog hardening against chained-worker self-misidentification and startup stalls.
+
 ### Added
 - **Council blind-spot surfacing in the run report** (`report.council_blind_spots`). A run that
   loses its cross-vendor review no longer looks like a run that had one. Two deterministic
@@ -31,6 +36,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tickets 1–2 led the worker to conclude the gateway was down; from ticket 4 it stopped trying.
   The gateway answered normally minutes later. Eight diffs merged with no cross-vendor review
   while the report read as if they had been reviewed.
+- **Run-token self-identification + early-stale startup detection** (INT-2674). The launcher now
+  generates a UUID per launch and injects it upstream of every spawn path — into the prompt's
+  last argv element (visible in `/proc/<pid>/cmdline`) and into the child's `UE_ANS_RUN_TOKEN`
+  env — so a chained worker that finds a `claude` process carrying the same token during a
+  process check knows it is looking at itself (the per-repo flock guarantees ≤1 live runner)
+  and proceeds instead of stalling on a choice prompt. The watchdog gains `--early-stale`
+  (default 1200s, config key `early_stale_s`): after grace + early-stale seconds, a child whose
+  heartbeat age exceeds its lifetime has never called `next()` — a startup stall — and is
+  restarted early. Fires at most once per child lifetime; long ticket implementations
+  (30–90&nbsp;min between beats) are never touched.
 
 ## [1.8.0] — 2026-07-16
 

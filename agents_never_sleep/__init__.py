@@ -2,4 +2,4 @@
 
 Public surface used by the acceptance demo and the (future) SKILL.md entrypoint.
 """
-__version__ = "1.8.0"
+__version__ = "1.9.0"
