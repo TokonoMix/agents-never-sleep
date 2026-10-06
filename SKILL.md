@@ -236,13 +236,27 @@ record `autonomy_confirmed` and become launchable:
 
 | CLI | unattended invocation | the flag grants |
 |---|---|---|
-| Claude Code | `claude -p --permission-mode acceptEdits` | file edits auto-approved; shell/network stay gated |
+| Claude Code | `claude -p --permission-mode bypassPermissions` | EVERYTHING — file writes, shell and network; the ANS deny-hooks stay the floor |
 | Codex | `codex exec --sandbox workspace-write` | edits/commands inside the workspace sandbox |
 | Gemini | `gemini --yolo -p` | EVERYTHING — run in a container/VM or throwaway checkout |
 | Copilot | `copilot --allow-all-tools -p` | everything (required for programmatic `-p`) |
 
 A preset without `autonomy_confirmed` refuses to launch detached — a deliberate NO-GO instead of
 a silent stall-and-burn, and instead of nudging users to google a bypass flag without guidance.
+
+**Base rule — the permission mode must not be able to stop the run.** For Claude Code,
+"won't hang" is not enough: in headless `-p` a gated shell/network call is auto-*denied*, not
+prompted, so an edits-only mode (`acceptEdits`) yields a run that silently does nothing. The
+preflight therefore ranks the resolved argv: `bypassPermissions` (= `--dangerously-skip-permissions`)
+is full autonomy → GO; `auto` is the accepted minimum → GO with a note (its classifier can still
+deny a step); `acceptEdits` → NO-GO detached; a bare `claude -p` is judged by the *effective*
+Claude settings `permissions.defaultMode` (managed > repo local > repo shared > user) and NO-GOes
+when that is interactive too — a user-level bypass makes it GO, with the non-portable reliance
+named. Whenever ANS prepares a run with a human present (`ans-run init`, the wizard, a launch
+from a terminal) and the configured mode would stop it, ANS **offers the fix with consent**: a
+yes rewrites the preset to `--permission-mode bypassPermissions`, re-records trust and re-runs
+the preflight as proof; a no leaves the NO-GO standing with this explanation. Never under
+`--check` (dry run), `--yes` (skip-prompts must not authorize) or a non-TTY (nobody to consent).
 
 ### Tokonomix-delegated routing — the managed tier (token-refs, never literal keys)
 

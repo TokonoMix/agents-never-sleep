@@ -73,7 +73,7 @@ grants *before* asking the human to confirm:
 
 | CLI | unattended invocation | the flag grants |
 |---|---|---|
-| Claude Code | `claude -p --permission-mode acceptEdits` | file edits auto-approved; shell/network stay gated |
+| Claude Code | `claude -p --permission-mode bypassPermissions` | EVERYTHING — file writes, shell and network; the ANS deny-hooks stay the floor |
 | Codex | `codex exec --sandbox workspace-write` | edits/commands inside the workspace sandbox |
 | Gemini | `gemini --yolo -p` | EVERYTHING — run in a container/VM or throwaway checkout |
 | Copilot | `copilot --allow-all-tools -p` | everything (required for programmatic `-p`) |
@@ -81,9 +81,20 @@ grants *before* asking the human to confirm:
 The map (`agent_clis.py`) is the single source for both the wizard and the launcher, so the two never drift.
 For a detached launch the launcher does **not** trust the `autonomy_confirmed` boolean alone: it inspects
 the resolved argv and refuses (NO-GO) if it carries no non-interactive permission flag — catching a
-hand-edited preset that would otherwise hang silently at the first tool prompt. (`--permission-mode
-acceptEdits` clears the hang but only auto-approves *edits*; shell/network stay gated, so a bash-heavy
-detached run makes little progress — full autonomy is `--dangerously-skip-permissions` / the CLI equivalent.)
+hand-edited preset that would otherwise hang silently at the first tool prompt.
+
+For Claude Code the bar is higher than "won't hang". In headless `-p` a gated shell/network call is
+auto-*denied*, not prompted, so `--permission-mode acceptEdits` yields a run that silently does nothing:
+the preflight ranks the resolved argv — `bypassPermissions` (= `--dangerously-skip-permissions`) is full
+autonomy → GO; `auto` is the accepted minimum → GO with a note (its classifier can still deny a step);
+`acceptEdits` → NO-GO detached (note under `--fg`, where you see the denials); a bare `claude -p` is
+judged by the *effective* Claude settings `permissions.defaultMode` (managed > repo local > repo shared
+> user) — a user-level bypass makes it GO with the non-portable reliance named, anything interactive
+is a NO-GO. The NO-GO is never a dead end when a human is preparing the run: launched from a terminal
+(no `--check`, no `--yes`), the launcher **offers the one-step repair** — rewrite the preset to
+`--permission-mode bypassPermissions`, re-record trust, and re-execute itself so the fresh preflight is
+the proof — and applies it only after an explicit yes. The same offer is made by `ans-run init` and
+the wizard (one shared prompt, `agent_clis.prompt_autonomy_presets`).
 
 ## Atomic, pidfile-free mutual exclusion
 

@@ -55,16 +55,21 @@ two decisions worth attention:
   "launcher": {
     "default_agent": "claude",
     "agents": {
-      "claude": { "cmd": ["claude", "-p", "--permission-mode", "acceptEdits"],
+      "claude": { "cmd": ["claude", "-p", "--permission-mode", "bypassPermissions"],
                   "autonomy_confirmed": true }
     }
   }
   ```
 
-  `acceptEdits` auto-approves **file edits only** — shell/network tools stay under your normal
-  permission rules. Setting `autonomy_confirmed: true` is the explicit human decision the launcher
-  requires; an unconfirmed preset refuses to launch detached (a deliberate NO-GO instead of a
-  silent stall).
+  `bypassPermissions` auto-approves **every** tool call (it is the same as
+  `--dangerously-skip-permissions`); the ANS deny-hooks remain the safety floor. It is the shipped
+  unattended mode on purpose: in headless `-p` a gated shell call is auto-*denied*, not prompted, so
+  the narrower `acceptEdits` gives a run that silently does nothing — the preflight refuses it
+  (NO-GO) and, when you launch from a terminal, offers to switch the preset for you (rewrite,
+  re-trust, re-run the preflight as proof) after an explicit yes. `auto` is the accepted minimum
+  (it never prompts, but its classifier can still deny a step). Setting `autonomy_confirmed: true`
+  is the explicit human decision the launcher requires; an unconfirmed preset refuses to launch
+  detached (a deliberate NO-GO instead of a silent stall).
 
 **Pre-authorize deny-list classes (optional).** The wizard — and `ans-run init` when run
 interactively — then asks, once per deny-list class, whether to pre-authorize it for this run

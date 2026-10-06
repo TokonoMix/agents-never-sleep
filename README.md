@@ -372,11 +372,17 @@ GO/NO-GO gate that runs **before** the agent CLI boots:
   probe (catches flag drift before tokens are spent) and carry `autonomy_confirmed: true`.
 - **Autonomy flags are an explicit human decision, never a default.** A detached run with permissions
   fully on stalls at the first approval prompt; the flag that prevents that grants real power
-  (`--permission-mode acceptEdits`, `--sandbox workspace-write`, `--yolo`, `--allow-all-tools`). The
-  wizard shows what the flag grants before the preset can be marked launchable, and a detached launch
-  **preflight-verifies the resolved argv actually carries a non-interactive permission flag** — so a
-  hand-edited config that keeps `autonomy_confirmed: true` but drops the flag is refused (NO-GO)
-  instead of hanging silently at the first tool prompt.
+  (`--permission-mode bypassPermissions`, `--sandbox workspace-write`, `--yolo`, `--allow-all-tools`).
+  The wizard (and `ans-run init`) shows what the flag grants before the preset can be marked
+  launchable, and a detached launch **preflight-verifies the resolved argv actually carries a
+  permission mode that cannot stop the run** — so a hand-edited config that keeps
+  `autonomy_confirmed: true` but drops the flag is refused (NO-GO) instead of hanging silently at the
+  first tool prompt. For Claude Code the bar is full autonomy: headless `-p` auto-*denies* gated
+  shell calls, so `acceptEdits` is a NO-GO (a run that silently does nothing), `auto` is the accepted
+  minimum (GO + note: its classifier can still deny a step), and a bare `claude -p` is judged by the
+  effective settings `defaultMode`. When a human is preparing the run from a terminal, the NO-GO
+  comes with a one-step offer — rewrite the preset, re-trust, re-run the preflight as proof — that
+  only ever applies after an explicit yes (never under `--check`, `--yes` or a non-TTY).
 - **Opt-in capability restriction:** a preset may declare a `capabilities` list (e.g.
   `--strict-mcp-config --mcp-config <file>`) so the agent loads only the MCP servers / tools a run
   needs — smaller memory footprint and attack surface. Absent = the full set (today's behaviour).
@@ -640,7 +646,7 @@ ways a platform plugs in. **Be precise about which:** *live-verified*, *built-to
 
   | CLI | unattended invocation | the autonomy flag grants |
   |---|---|---|
-  | Claude Code | `claude -p --permission-mode acceptEdits` | file edits auto-approved; shell/network stay gated |
+  | Claude Code | `claude -p --permission-mode bypassPermissions` | EVERYTHING — file writes, shell and network; the ANS deny-hooks stay the floor |
   | OpenAI Codex | `codex exec --sandbox workspace-write` | edits/commands inside the workspace sandbox |
   | Gemini | `gemini --yolo -p` | EVERYTHING — run in a container/throwaway checkout |
   | GitHub Copilot | `copilot --allow-all-tools -p` | everything (required for programmatic `-p`) |

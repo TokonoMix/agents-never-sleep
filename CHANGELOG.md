@@ -10,6 +10,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Claude Code's shipped unattended invocation is now `claude -p --permission-mode
+  bypassPermissions`** (was `acceptEdits`). Operator decision 2026-09-30: permission prompts are
+  noise in an unattended run, and an edits-only mode is worse than a prompt — in headless `-p` a
+  gated shell/network call is auto-*denied*, not prompted, so an `acceptEdits` run silently does
+  nothing on a bash-heavy backlog. The wizard still shows what the flag grants and asks before a
+  preset records `autonomy_confirmed`; the ANS deny-hooks remain the safety floor.
+  **Migration:** an existing preset with `acceptEdits` is now a detached NO-GO (see below) —
+  accept the one-step repair offer from a terminal, or edit the preset and `ans-run --trust`.
+- **Launcher preflight ranks Claude's permission mode** instead of only checking "won't hang":
+  `bypassPermissions` / `--dangerously-skip-permissions` = full autonomy → GO; `--permission-mode
+  auto` = the accepted minimum → GO with a note (its classifier can still deny a step);
+  `acceptEdits` → **NO-GO** for a detached run (note under `--fg`); a bare `claude -p` is judged by
+  the *effective* Claude settings `permissions.defaultMode` (managed > repo local > repo shared >
+  user) — a user-level bypass is no longer a false NO-GO, and the non-portable reliance is named.
+  `NONINTERACTIVE_MARKERS` accepts `auto`.
+
+### Added
+- **Base rule: the permission mode must not be able to stop the run — and the fix is offered with
+  consent.** When a human is preparing the run (a launch from a terminal without `--check`/`--yes`,
+  `ans-run init`, the wizard) and the configured mode would stop it, ANS offers to switch the
+  preset to `--permission-mode bypassPermissions`; a yes rewrites the preset, re-records TOFU
+  trust and re-runs the preflight as proof (the launcher re-executes itself), a no / EOF leaves
+  the NO-GO standing with the explanation. Never applied silently: not under `--check` (dry run),
+  `--yes` (skip-prompts must not authorize) or a non-TTY (nobody to consent).
+  `agent_clis.claude_permission_level`, `agent_clis.with_full_autonomy`,
+  `launcher.claude_settings_default_mode`, `launcher.offer_permission_repair`.
+- **`ans-run init` offers the autonomy flag** per installed CLI (interactive only) through the
+  same prompt the wizard uses — `agent_clis.prompt_autonomy_presets`, one UI for both entry
+  points — before save + trust, so trust covers the config a yes produces.
+
 ## [1.9.0] — 2026-08-02
 
 Two backward-compatible additions (MINOR): council blind-spot surfacing in the run report, and

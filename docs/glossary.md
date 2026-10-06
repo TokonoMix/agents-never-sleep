@@ -190,10 +190,13 @@ Trust is recorded *outside* the repo (`~/.config/agents-never-sleep/trusted.json
 SHA-256), because the repo cannot vouch for itself. Headless + untrusted = NO-GO. Lives in `trust.py`.
 
 **Autonomy-confirmed preset** — A launcher agent preset that has explicitly recorded `autonomy_confirmed:
-true`. A detached run needs an autonomy flag (e.g. Claude Code's `--permission-mode acceptEdits`) or it
-stalls at its first approval prompt; that flag grants real power, so the wizard shows what it grants before
-asking the human to confirm. A preset without confirmation refuses to launch detached — a deliberate
-NO-GO instead of a silent stall. Map in `agent_clis.py`.
+true`. A detached run needs an autonomy flag (e.g. Claude Code's `--permission-mode bypassPermissions`)
+or it stalls at its first approval prompt; that flag grants real power, so the wizard shows what it grants
+before asking the human to confirm. A preset without confirmation refuses to launch detached — a deliberate
+NO-GO instead of a silent stall. For Claude Code an edits-only mode (`acceptEdits`) is also a NO-GO: headless
+`-p` auto-denies gated shell calls, so the run would silently do nothing; `auto` is the accepted minimum.
+When a human is preparing the run, the NO-GO comes with a consent-gated one-step repair. Map and ranking
+in `agent_clis.py`.
 
 **Working-tree flock** — The mutual-exclusion lock (`<repo>/.unattended/ans-run.lock`) the launcher takes
 via a non-blocking `flock(2)` before the expensive probes, handing the open FD to the long-lived agent
