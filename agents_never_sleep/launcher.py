@@ -50,8 +50,9 @@ import tempfile
 import time
 import uuid
 
-from .agent_clis import (AGENT_CLIS, cli_for_argv, is_allowlisted,
-                         is_noninteractive_permission)
+from .agent_clis import (AGENT_CLIS, claude_level_for_mode, claude_permission_level,
+                         cli_for_argv, is_allowlisted, is_noninteractive_permission,
+                         with_full_autonomy)
 from .fsutil import ensure_private_dir
 from . import init_cmd   # top-level; launch-time-only module, see subcommand dispatch below
 from .keysource import resolve_ref
@@ -484,43 +485,103 @@ def check_enforcement_hooks_wired(agent_argv: list, rep: Report) -> None:
              f"--harness {cli}` to wire them; this run proceeds on the prose-contract only")
 
 
-def check_detached_permission_mode(agent_argv, foreground: bool, rep: Report) -> None:
+# Claude Code settings files that may set `permissions.defaultMode`, in Claude Code's own
+# precedence order (managed policy > repo local > repo shared > user). Command-line flags beat
+# all of them — which is exactly why the portable form is an explicit --permission-mode on the
+# preset argv: a worktree, another user or a CI box does not carry this user's settings file.
+_CLAUDE_MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json"
+
+
+def claude_settings_default_mode(repo: str, home: str | None = None) -> str | None:
+    """Best-effort read of the EFFECTIVE Claude Code `permissions.defaultMode` for a bare
+    `claude -p` argv: the first settings file (precedence order above) that sets it wins.
+    Unreadable/invalid files are skipped. None = no file sets it (Claude's own default:
+    interactive prompts)."""
+    home = home or os.path.expanduser("~")
+    for path in (_CLAUDE_MANAGED_SETTINGS,
+                 os.path.join(repo, ".claude", "settings.local.json"),
+                 os.path.join(repo, ".claude", "settings.json"),
+                 os.path.join(home, ".claude", "settings.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        perms = data.get("permissions") if isinstance(data, dict) else None
+        mode = perms.get("defaultMode") if isinstance(perms, dict) else None
+        if isinstance(mode, str) and mode:
+            return mode
+    return None
+
+
+_REPAIR_HINT = ("Unattended runs need --permission-mode bypassPermissions (accepted minimum: "
+                "auto). Repair in one step: run `ans-run --repo <repo> <prompt>` from a terminal "
+                "and answer yes to the offer (rewrites the preset, re-trusts the config, re-runs "
+                "this preflight as proof) — or edit the preset by hand and `ans-run --trust`")
+
+
+def check_detached_permission_mode(agent_argv, foreground: bool, rep: Report,
+                                   repo: str | None = None) -> str:
     """A detached run has stdin closed (Popen stdin=DEVNULL / no --fg). If the agent CLI's
     OWN permission system is still interactive, the first tool-approval prompt HANGS the run
     silently — a gate ABOVE the agent that no prompt-instruction can bypass. resolve_agent
     already checks the preset's autonomy_confirmed BOOLEAN, but that is a human-set flag a
     hand-edited config can desync from the actual cmd; here we inspect the RESOLVED argv for
     the CLI's real non-interactive permission flag. Blocking only for a detached launch
-    (foreground = a human is attached and interactive approvals are their explicit choice)."""
+    (foreground = a human is attached and interactive approvals are their explicit choice).
+
+    For claude the bar is higher than "won't hang" (operator decision 2026-09-30): headless -p
+    auto-DENIES a gated shell call instead of prompting, so an edits-only mode (acceptEdits)
+    yields a run that silently does nothing — NO-GO, like a bare argv. `auto` is the accepted
+    minimum (GO + note: its classifier can still deny a step); bypassPermissions is full
+    autonomy. A bare argv is judged by the EFFECTIVE settings defaultMode when `repo` is given
+    (a user-level bypass makes the run work; the reliance is noted because it isn't portable).
+
+    Returns the resolved claude level ('full' | 'auto' | 'edits' | 'gated'), '' for any other
+    CLI — main() offers the consent-driven one-step repair for a repairable level."""
     if not agent_argv:
-        return  # resolve_agent already recorded a NO-GO
-    verdict = is_noninteractive_permission(agent_argv)
+        return ""  # resolve_agent already recorded a NO-GO
     cli = cli_for_argv(agent_argv) or os.path.basename(str(agent_argv[0]))
-    if verdict is True:
-        # "won't hang" is NOT "fully autonomous": claude --permission-mode acceptEdits
-        # auto-approves FILE EDITS only; in headless -p a gated Bash/network tool is
-        # auto-DENIED (not hung), so a bash-heavy backlog run makes no progress. Only a
-        # FULL-autonomy flag actually lets a detached run function end-to-end.
-        tokens = [str(a) for a in agent_argv]
-
-        def _pm_is(values: set) -> bool:
-            for i, tok in enumerate(tokens):
-                if tok == "--permission-mode" and i + 1 < len(tokens) and tokens[i + 1] in values:
-                    return True
-                if tok.startswith("--permission-mode=") and tok.split("=", 1)[1] in values:
-                    return True
-            return False
-
-        edits_only = (cli == "claude" and "--dangerously-skip-permissions" not in tokens
-                      and not _pm_is({"bypassPermissions"}) and _pm_is({"acceptEdits"}))
-        if edits_only:
-            rep.note(f"permission mode: '{cli}' auto-approves FILE EDITS only (won't hang), but "
-                     "shell/network tools stay gated → auto-denied in a detached run; a bash-"
-                     "heavy backlog may make no progress. Full autonomy = "
-                     "--dangerously-skip-permissions")
+    if cli == "claude":
+        level = claude_permission_level(agent_argv)
+        via = ""
+        if level == "gated" and repo is not None:
+            mode = claude_settings_default_mode(repo)
+            if mode is not None:
+                level = claude_level_for_mode(mode)
+                via = f" (from Claude settings defaultMode={mode} — not on the argv, so not " \
+                      "portable to a worktree/other user/CI; put --permission-mode on the preset)"
+        if level == "full":
+            rep.ok("permission mode: 'claude' is non-interactive with full autonomy (safe to "
+                   "run detached)" + via)
+            if via:
+                rep.note("permission mode relies on a settings file" + via)
+        elif level == "auto":
+            rep.ok("permission mode: 'claude' --permission-mode auto never prompts (won't "
+                   "hang detached)" + via)
+            rep.note("permission mode auto: the classifier can still deny a step mid-run; "
+                     "full autonomy = --permission-mode bypassPermissions")
+        elif level == "edits":
+            msg = ("permission mode: 'claude' acceptEdits auto-approves FILE EDITS only — in "
+                   "headless -p every gated shell/network call is auto-denied, so a detached run "
+                   "silently makes no progress" + via)
+            if foreground:
+                rep.note(msg + ". Fine with --fg (you see the denials), NO-GO detached")
+            else:
+                rep.bad(msg + ". " + _REPAIR_HINT)
+        elif foreground:
+            rep.note("permission mode: 'claude' argv is interactive — fine with --fg (a human "
+                     "is attached), but a DETACHED launch of this preset would hang on the "
+                     "first tool prompt" + via)
         else:
-            rep.ok(f"permission mode: '{cli}' argv is non-interactive with full autonomy "
-                   "(safe to run detached)")
+            rep.bad("detached run + interactive permission mode: the resolved 'claude' argv "
+                    "carries no non-interactive permission flag" + via + ", so it would hang "
+                    "silently on the first tool prompt (stdin is closed). " + _REPAIR_HINT)
+        return level
+    verdict = is_noninteractive_permission(agent_argv, cli)
+    if verdict is True:
+        rep.ok(f"permission mode: '{cli}' argv is non-interactive with full autonomy "
+               "(safe to run detached)")
     elif verdict is None:
         rep.note(f"permission mode: cannot verify for custom agent '{cli}' — relying on the "
                  "preset's autonomy_confirmed; make sure its flags don't gate tool calls "
@@ -532,10 +593,58 @@ def check_detached_permission_mode(agent_argv, foreground: bool, rep: Report) ->
     else:
         rep.bad("detached run + interactive permission mode: the resolved '" + cli + "' argv "
                 "carries no non-interactive permission flag, so it would hang silently on the "
-                "first tool prompt (stdin is closed). Add the CLI's autonomy flag (claude: "
-                "--permission-mode acceptEdits or --dangerously-skip-permissions; codex: "
+                "first tool prompt (stdin is closed). Add the CLI's autonomy flag (codex: "
                 "--sandbox workspace-write; gemini: --yolo; copilot: --allow-all-tools), or "
                 "run foreground with --fg")
+    return ""
+
+
+def offer_permission_repair(repo: str, preset_name: str, *, ask=input) -> bool:
+    """The consent-driven one-step repair behind check_detached_permission_mode's NO-GO
+    (base rule, operator 2026-09-30): show the human preparing the run what the preset would
+    become, ask ONCE, and on a yes rewrite the preset's cmd to `--permission-mode
+    bypassPermissions` (with_full_autonomy — the RAW cmd from the file, not the resolved argv
+    with capability tokens appended), mark autonomy_confirmed, and re-record TOFU trust for
+    the rewritten file. The caller re-runs the preflight as proof. A no / EOF / nothing to
+    repair changes nothing and returns False. Never called under --check, --yes or a non-TTY:
+    consent is explicit, per run, and only from a human."""
+    from .config import load_config, save_config
+    data = load_config(repo) or {}
+    launcher = data.get("launcher") if isinstance(data.get("launcher"), dict) else None
+    if launcher is None:
+        return False
+    if preset_name == "agent_cmd":
+        raw = launcher.get("agent_cmd")
+    else:
+        preset = launcher.get("agents", {}).get(preset_name)
+        raw = preset.get("cmd") if isinstance(preset, dict) else None
+    raw = _as_argv(raw) if raw else []
+    fixed = with_full_autonomy(raw)
+    if not raw or fixed == raw:
+        return False
+    print("")
+    print("  The configured permission mode would stop this unattended run (see ✗ above).")
+    print(f"  Offer: switch preset '{preset_name}' to full autonomy, re-trust the config and "
+          "re-run the preflight as proof:")
+    print(f"      {' '.join(raw)}")
+    print(f"   →  {' '.join(fixed)}")
+    print("  bypassPermissions auto-approves ALL tool calls; the ANS deny-hooks stay the floor.")
+    try:
+        reply = ask("  Apply --permission-mode bypassPermissions now? (y/n) [n]: ")
+    except EOFError:
+        reply = ""
+    if not str(reply).strip().lower().startswith("y"):
+        print("  Kept as is — the NO-GO stands.")
+        return False
+    if preset_name == "agent_cmd":
+        launcher["agent_cmd"] = fixed
+    else:
+        preset["cmd"] = fixed
+        preset["autonomy_confirmed"] = True
+    save_config(repo, data)
+    digest = record_trust(repo, os.path.join(repo, CONFIG_REL))
+    print(f"  Rewrote {CONFIG_REL} and recorded trust (sha256 {(digest or '?')[:16]}…).")
+    return True
 
 
 # Env vars in a preset that change which code a "trusted" invocation actually runs. Even
@@ -1117,7 +1226,19 @@ def main() -> int:
         cfg, config_exists, args.agent, rep)
     # A detached launch (no --fg) with an interactively-gated agent hangs on the first tool
     # prompt — inspect the resolved argv, not just the autonomy_confirmed boolean.
-    check_detached_permission_mode(agent_argv, args.fg, rep)
+    perm_level = check_detached_permission_mode(agent_argv, args.fg, rep, repo=repo)
+    # Base rule (operator, 2026-09-30): a mode that would stop the run is never left as a bare
+    # NO-GO when a human is preparing the run — offer the one-step repair, WITH consent. Never
+    # under --check (side-effect-free dry run), --yes (skip-prompts must not authorize), or a
+    # non-TTY (nobody to consent). A yes rewrites + re-trusts, then re-executes this very
+    # command so the fresh preflight is the proof (and the normal pre-launch confirm follows).
+    if (perm_level in ("edits", "gated") and not args.fg and not args.check and not args.yes
+            and sys.stdin.isatty()):
+        if offer_permission_repair(repo, preset_name):
+            _release()
+            print("  re-running the preflight on the repaired config as proof ...\n")
+            sys.stdout.flush()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
     # Non-blocking: is enforcement actually wired for the resolved harness? (Task B, consensus T1)
     check_enforcement_hooks_wired(agent_argv, rep)
     # Token-ref resolution (F4) happens HERE — before the capability probe — so the probe

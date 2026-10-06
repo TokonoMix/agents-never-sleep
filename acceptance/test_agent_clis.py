@@ -100,6 +100,74 @@ def test_scaffold_preset_confirmed_vs_safe(failures):
             failures.append(f"[scaffold_preset] {name} confirmed=False row wrong: {row_false!r}")
 
 
+def test_claude_unattended_is_full_bypass(failures):
+    # 2026-09-30 operator decision: an unattended run must not be left with an edits-only mode.
+    # In headless `-p`, a gated Bash call is auto-DENIED (not prompted), so acceptEdits yields a
+    # run that silently does nothing. The shipped unattended variant is therefore full bypass,
+    # and the lockstep marker table knows `auto` (won't hang; the classifier can still deny).
+    from agents_never_sleep.agent_clis import (NONINTERACTIVE_MARKERS,
+                                               is_noninteractive_permission)
+    want = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+    if AGENT_CLIS["claude"]["cmd_unattended"] != want:
+        failures.append(f"[claude] cmd_unattended should be {want}, got "
+                        f"{AGENT_CLIS['claude']['cmd_unattended']}")
+    if "auto" not in NONINTERACTIVE_MARKERS["claude"]["pairs"]["--permission-mode"]:
+        failures.append("[claude] NONINTERACTIVE_MARKERS must accept --permission-mode auto")
+    if is_noninteractive_permission(["claude", "-p", "--permission-mode", "auto"]) is not True:
+        failures.append("[claude] --permission-mode auto must read as non-interactive (won't hang)")
+    if "acceptEdits" in " ".join(AGENT_CLIS["claude"]["grants"]):
+        failures.append("[claude] grants text must describe the bypass flag, not acceptEdits")
+
+
+def test_claude_permission_level(failures):
+    # One classifier for the launcher's GO/NOTE/NO-GO decision (SSOT, next to the marker
+    # table): full (end-to-end autonomous) > auto (won't hang, may still deny a step) >
+    # edits (file edits only; shell auto-denied headless) > gated (prompts → hangs detached).
+    from agents_never_sleep.agent_clis import claude_permission_level
+    cases = (
+        (["claude", "-p", "--permission-mode", "bypassPermissions"], "full"),
+        (["claude", "-p", "--permission-mode=bypassPermissions"], "full"),
+        (["claude", "-p", "--dangerously-skip-permissions"], "full"),
+        (["claude", "-p", "--permission-mode", "auto"], "auto"),
+        (["claude", "-p", "--permission-mode", "acceptEdits"], "edits"),
+        (["claude", "-p", "--permission-mode=acceptEdits"], "edits"),
+        (["claude", "-p"], "gated"),
+        (["claude", "-p", "--permission-mode", "plan"], "gated"),
+        (["claude", "-p", "--permission-mode", "default"], "gated"),
+    )
+    for argv, want in cases:
+        got = claude_permission_level(argv)
+        if got != want:
+            failures.append(f"[level] {argv} → {got!r}, want {want!r}")
+
+
+def test_with_full_autonomy_rewrites_claude_argv(failures):
+    # The consent-driven repair: append the bypass pair when no --permission-mode is present,
+    # replace the value (both forms) when one is, drop a redundant edits-only pair, and leave an
+    # already-full argv untouched. Other CLIs are returned unchanged (no table knowledge).
+    from agents_never_sleep.agent_clis import with_full_autonomy
+    full = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+    cases = (
+        (["claude", "-p"], full),
+        (["claude", "-p", "--permission-mode", "acceptEdits"], full),
+        (["claude", "-p", "--permission-mode=plan"], ["claude", "-p",
+                                                     "--permission-mode=bypassPermissions"]),
+        (["claude", "-p", "--permission-mode", "auto", "--model", "x"],
+         ["claude", "-p", "--permission-mode", "bypassPermissions", "--model", "x"]),
+        (full, full),
+        (["claude", "-p", "--dangerously-skip-permissions"],
+         ["claude", "-p", "--dangerously-skip-permissions"]),
+        (["codex", "exec"], ["codex", "exec"]),
+    )
+    for argv, want in cases:
+        before = list(argv)
+        got = with_full_autonomy(argv)
+        if got != want:
+            failures.append(f"[repair] {argv} → {got}, want {want}")
+        if argv != before:
+            failures.append(f"[repair] input argv was mutated: {before} → {argv}")
+
+
 def main() -> int:
     failures = []
     test_map_shape(failures)
@@ -107,6 +175,9 @@ def main() -> int:
     test_preflight_uses_shared_detector(failures)
     test_allowlist_bare_name_only(failures)
     test_scaffold_preset_confirmed_vs_safe(failures)
+    test_claude_unattended_is_full_bypass(failures)
+    test_claude_permission_level(failures)
+    test_with_full_autonomy_rewrites_claude_argv(failures)
     print("=" * 60)
     if failures:
         print("RESULT: ❌ RED — agent-CLI map/detection not proven")

@@ -195,7 +195,7 @@ def test_known_cli_capability_probe(failures):
         os.chmod(fake, 0o755)
         _write_config(repo, {
             "agents": {"claude": {"cmd": ["claude", "-p", "--permission-mode",
-                                          "acceptEdits"],
+                                          "bypassPermissions"],
                                   "autonomy_confirmed": True, "env": {}}},
             "default_agent": "claude", "min_disk_mb": 1,
         })
@@ -231,6 +231,9 @@ def test_detached_interactive_permission_mode_is_nogo(failures):
     # (not just autonomy_confirmed) and refuses a detached launch — but a non-interactive
     # flag proceeds, and --fg (human attached) is allowed.
     repo, penv = _fake_claude_repo(["claude", "-p"])  # cmd_safe: permissions ON
+    # Isolate HOME: a bare argv is judged by the effective settings defaultMode too, and the
+    # developer's own ~/.claude/settings.json may well set bypassPermissions.
+    penv = dict(penv, HOME=_home_with_claude_settings(None))
     res = _run(repo, "--check", env_extra=penv)
     if res.returncode != EX_NOGO:
         failures.append(f"[perm] detached interactive preset: expected {EX_NOGO}, got "
@@ -244,11 +247,29 @@ def test_detached_interactive_permission_mode_is_nogo(failures):
         failures.append(f"[perm] --fg interactive preset should be GO, got "
                         f"{res_fg.returncode}: {res_fg.stdout}")
 
-    # Both non-interactive flags are GO (won't hang), but the messaging must distinguish
-    # edit-only autonomy (acceptEdits: shell/network still gated → inert, not hung) from
-    # full autonomy (--dangerously-skip-permissions: functions end-to-end detached).
+    # Operator decision 2026-09-30: edits-only autonomy (acceptEdits) is a NO-GO for a
+    # detached run — headless -p auto-DENIES gated shell calls, so the run silently does
+    # nothing. The refusal must say so and name the one-step repair (bypassPermissions).
+    # Non-TTY here (stdin=DEVNULL), so the repair is named, never prompted for.
+    repo_ae, penv_ae = _fake_claude_repo(["claude", "-p", "--permission-mode", "acceptEdits"])
+    res_ae = _run(repo_ae, "--check", env_extra=penv_ae)
+    if res_ae.returncode != EX_NOGO:
+        failures.append(f"[perm] detached acceptEdits preset: expected {EX_NOGO}, got "
+                        f"{res_ae.returncode}: {res_ae.stdout}")
+    if "auto-denied" not in res_ae.stdout or "bypassPermissions" not in res_ae.stdout:
+        failures.append(f"[perm] acceptEdits refusal must explain the silent-deny and name "
+                        f"the bypassPermissions repair: {res_ae.stdout}")
+    # --fg with acceptEdits: a human is attached and can see the denials → note, not NO-GO.
+    res_ae_fg = _run(repo_ae, "--check", "--fg", env_extra=penv_ae)
+    if res_ae_fg.returncode != 0:
+        failures.append(f"[perm] --fg acceptEdits should be GO (note only), got "
+                        f"{res_ae_fg.returncode}: {res_ae_fg.stdout}")
+
+    # auto = the accepted minimum: GO, but the report says the classifier can still deny.
+    # Full autonomy (bypassPermissions / --dangerously-skip-permissions) reports as such.
     for ok_cmd, want_copy in (
-            (["claude", "-p", "--permission-mode", "acceptEdits"], "FILE EDITS only"),
+            (["claude", "-p", "--permission-mode", "auto"], "can still deny"),
+            (["claude", "-p", "--permission-mode", "bypassPermissions"], "full autonomy"),
             (["claude", "-p", "--dangerously-skip-permissions"], "full autonomy")):
         repo_ok, penv_ok = _fake_claude_repo(ok_cmd)
         res_ok = _run(repo_ok, "--check", env_extra=penv_ok)
@@ -257,6 +278,148 @@ def test_detached_interactive_permission_mode_is_nogo(failures):
                             f"{res_ok.returncode}: {res_ok.stdout}")
         if want_copy not in res_ok.stdout:
             failures.append(f"[perm] {ok_cmd} should report '{want_copy}': {res_ok.stdout}")
+
+
+def _home_with_claude_settings(default_mode: str | None) -> str:
+    home = tempfile.mkdtemp(prefix="ue-launcher-home-")
+    if default_mode is not None:
+        os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
+        with open(os.path.join(home, ".claude", "settings.json"), "w") as fh:
+            json.dump({"permissions": {"defaultMode": default_mode}}, fh)
+    return home
+
+
+def test_bare_claude_p_honours_effective_default_mode(failures):
+    # A bare `claude -p` preset is gated by the argv alone — but Claude Code also takes its
+    # permission mode from settings (managed > repo local > repo shared > user). A user-level
+    # defaultMode of bypassPermissions makes the detached run work, so the preflight must read
+    # the EFFECTIVE mode instead of refusing a config that runs fine (false NO-GO reported
+    # 2026-09-30) — while naming the reliance, since a settings file is not portable.
+    repo, penv = _fake_claude_repo(["claude", "-p"])
+    env = dict(penv)
+    env["HOME"] = _home_with_claude_settings("bypassPermissions")
+    res = _run(repo, "--check", env_extra=env)
+    if res.returncode != 0:
+        failures.append(f"[default-mode] bare -p + user defaultMode=bypassPermissions should be "
+                        f"GO, got {res.returncode}: {res.stdout}")
+    if "settings" not in res.stdout or "bypassPermissions" not in res.stdout:
+        failures.append(f"[default-mode] GO must name the settings reliance: {res.stdout}")
+
+    # Precedence: a repo-level settings.json that pins `default` overrides the user file → the
+    # effective mode is interactive again → NO-GO (never a GO on a mode that would hang).
+    os.makedirs(os.path.join(repo, ".claude"), exist_ok=True)
+    with open(os.path.join(repo, ".claude", "settings.json"), "w") as fh:
+        json.dump({"permissions": {"defaultMode": "default"}}, fh)
+    res_over = _run(repo, "--check", env_extra=env)
+    if res_over.returncode != EX_NOGO:
+        failures.append(f"[default-mode] repo settings defaultMode=default must override the "
+                        f"user bypass → NO-GO, got {res_over.returncode}: {res_over.stdout}")
+
+    # An effective `auto` is the accepted minimum (GO + note); `acceptEdits` from settings is
+    # exactly as insufficient as on the argv (NO-GO).
+    for mode, want_rc in (("auto", 0), ("acceptEdits", EX_NOGO)):
+        repo_m, penv_m = _fake_claude_repo(["claude", "-p"])
+        env_m = dict(penv_m)
+        env_m["HOME"] = _home_with_claude_settings(mode)
+        res_m = _run(repo_m, "--check", env_extra=env_m)
+        if res_m.returncode != want_rc:
+            failures.append(f"[default-mode] settings defaultMode={mode}: expected {want_rc}, "
+                            f"got {res_m.returncode}: {res_m.stdout}")
+
+
+def _load_cfg(repo: str) -> dict:
+    with open(os.path.join(repo, ".claude", "agents-never-sleep.json")) as fh:
+        return json.load(fh)
+
+
+def test_permission_repair_offer_rewrites_retrusts_and_proves(failures):
+    # Base rule (operator, 2026-09-30): when the configured mode would stop the run, ANS offers
+    # to switch the preset to bypassPermissions WITH the preparing human's consent, and on a
+    # yes does — in one step — the config rewrite, the re-trust, and (the caller's part) a
+    # fresh preflight as proof. A no, or EOF on the prompt, changes nothing.
+    sys.path.insert(0, SKILL_ROOT)
+    from agents_never_sleep import launcher
+    saved = {k: os.environ.get(k) for k in ("ANS_TRUST_STORE", "ANS_TEST_MODE")}
+    os.environ["ANS_TRUST_STORE"] = TRUST_STORE
+    os.environ["ANS_TEST_MODE"] = "1"
+    try:
+        full = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+        repo, penv = _fake_claude_repo(["claude", "-p", "--permission-mode", "acceptEdits"])
+
+        asked = []
+        if launcher.offer_permission_repair(repo, "claude",
+                                            ask=lambda p: asked.append(p) or "n") is not False:
+            failures.append("[repair] a 'no' must return False")
+        if len(asked) != 1 or "bypassPermissions" not in asked[0]:
+            failures.append(f"[repair] exactly one prompt naming bypassPermissions, got {asked}")
+        if _load_cfg(repo)["launcher"]["agents"]["claude"]["cmd"] != \
+                ["claude", "-p", "--permission-mode", "acceptEdits"]:
+            failures.append("[repair] a 'no' must leave the config untouched")
+
+        def _eof(_prompt):
+            raise EOFError
+        if launcher.offer_permission_repair(repo, "claude", ask=_eof) is not False:
+            failures.append("[repair] EOF on the prompt must count as no (never hang)")
+
+        if launcher.offer_permission_repair(repo, "claude", ask=lambda p: "y") is not True:
+            failures.append("[repair] a 'yes' must return True")
+        preset = _load_cfg(repo)["launcher"]["agents"]["claude"]
+        if preset["cmd"] != full or preset.get("autonomy_confirmed") is not True:
+            failures.append(f"[repair] yes must rewrite cmd + confirm autonomy, got {preset}")
+        # Proof: the rewritten config is trusted as-is and the preflight is GO with full autonomy.
+        res = _run(repo, "--check", env_extra=penv)
+        if res.returncode != 0 or "full autonomy" not in res.stdout:
+            failures.append(f"[repair] post-repair --check must be GO/full autonomy: "
+                            f"{res.returncode}: {res.stdout}")
+
+        # Legacy flat form (launcher.agent_cmd) is repaired in place too.
+        repo_legacy = _new_repo(SLEEPER, write_config=False)
+        _write_config(repo_legacy, {"agent_cmd": ["claude", "-p"], "min_disk_mb": 1})
+        if launcher.offer_permission_repair(repo_legacy, "agent_cmd", ask=lambda p: "y") is not True:
+            failures.append("[repair] legacy agent_cmd form must be repairable")
+        if _load_cfg(repo_legacy)["launcher"]["agent_cmd"] != full:
+            failures.append(f"[repair] legacy agent_cmd not rewritten: {_load_cfg(repo_legacy)}")
+
+        # Nothing to repair (already full) → False without prompting.
+        repo_full, _ = _fake_claude_repo(full)
+        if launcher.offer_permission_repair(repo_full, "claude", ask=_eof) is not False:
+            failures.append("[repair] an already-full preset must not be offered a repair")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_permission_repair_end_to_end_over_a_tty(failures):
+    # The launcher itself, driven over a real pty (stdin IS a tty → a human is preparing the
+    # run): the NO-GO becomes an offer, "y" repairs + re-trusts, the launcher re-executes
+    # itself and the fresh preflight is GO with full autonomy; the normal pre-launch
+    # confirmation then follows, where "no" cancels before any token is spent.
+    import pty
+    repo, penv = _fake_claude_repo(["claude", "-p", "--permission-mode", "acceptEdits"])
+    env = dict(os.environ)
+    env["ANS_TRUST_STORE"] = TRUST_STORE
+    env["ANS_TEST_MODE"] = "1"
+    env.update(penv)
+    master, slave = pty.openpty()
+    try:
+        os.write(master, b"y\nno\n")  # yes to the repair, no to "start a REAL run"
+        res = subprocess.run([sys.executable, ANS_RUN, "--repo", repo, "noop prompt"],
+                             stdin=slave, capture_output=True, text=True, timeout=60, env=env)
+    finally:
+        os.close(slave)
+        os.close(master)
+    if res.returncode != EX_NOGO or "cancelled by user" not in res.stderr:
+        failures.append(f"[repair-tty] expected the post-repair launch to reach the pre-launch "
+                        f"confirm and be cancelled: {res.returncode}: {res.stdout}{res.stderr}")
+    if "full autonomy" not in res.stdout or "as proof" not in res.stdout:
+        failures.append(f"[repair-tty] re-executed preflight must prove full autonomy: "
+                        f"{res.stdout}")
+    preset = _load_cfg(repo)["launcher"]["agents"]["claude"]
+    if preset["cmd"] != ["claude", "-p", "--permission-mode", "bypassPermissions"]:
+        failures.append(f"[repair-tty] config not rewritten: {preset}")
 
 
 def test_permission_marker_table_matches_cmd_variants(failures):
@@ -271,6 +434,8 @@ def test_permission_marker_table_matches_cmd_variants(failures):
             failures.append(f"[marker] cmd_safe for '{name}' should read interactive")
     if is_noninteractive_permission(["claude", "-p", "--permission-mode=acceptEdits"]) is not True:
         failures.append("[marker] --permission-mode=acceptEdits (=form) should read non-interactive")
+    if is_noninteractive_permission(["claude", "-p", "--permission-mode", "auto"]) is not True:
+        failures.append("[marker] --permission-mode auto should read non-interactive (won't hang)")
     if is_noninteractive_permission(["claude", "-p", "--permission-mode", "plan"]) is not False:
         failures.append("[marker] --permission-mode plan should read interactive")
     if is_noninteractive_permission(["my-agent", "run"]) is not None:
@@ -412,7 +577,7 @@ def test_preset_path_does_not_swap_probe_target(failures):
         fh.write("#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 3\nexit 0\n")
     os.chmod(fake, 0o755)
     _write_config(repo, {
-        "agents": {"claude": {"cmd": ["claude", "-p", "--permission-mode", "acceptEdits"],
+        "agents": {"claude": {"cmd": ["claude", "-p", "--permission-mode", "bypassPermissions"],
                               "autonomy_confirmed": True,
                               "env": {"PATH": evilbin + ":/usr/bin:/bin"}}},
         "default_agent": "claude", "min_disk_mb": 1,
@@ -804,6 +969,9 @@ def main() -> int:
     test_preset_selection_and_autonomy_gate(failures)
     test_known_cli_capability_probe(failures)
     test_detached_interactive_permission_mode_is_nogo(failures)
+    test_bare_claude_p_honours_effective_default_mode(failures)
+    test_permission_repair_offer_rewrites_retrusts_and_proves(failures)
+    test_permission_repair_end_to_end_over_a_tty(failures)
     test_permission_marker_table_matches_cmd_variants(failures)
     test_enforcement_hooks_note_when_unwired_but_still_go(failures)
     test_enforcement_hooks_no_note_when_wired(failures)

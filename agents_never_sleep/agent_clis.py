@@ -14,7 +14,12 @@ Two invocation variants per CLI, never merged silently:
                      explicitly confirm; only then does a preset record autonomy_confirmed.
 
 Flag reality check (2026-06, verified against vendor docs — re-verify when bumping):
-  claude  -p alone still enforces permissions; acceptEdits auto-approves file edits only.
+  claude  -p alone still enforces permissions; acceptEdits auto-approves file edits only —
+          and in headless -p a gated Bash/network call is auto-DENIED, not prompted, so an
+          acceptEdits run makes no progress on a bash-heavy backlog (silent, not hung).
+          `auto` won't hang but its classifier can still deny a step; only bypassPermissions
+          (== --dangerously-skip-permissions) runs end-to-end unattended. Operator decision
+          2026-09-30: the unattended variant is full bypass, `auto` is the accepted minimum.
   codex   exec defaults to on-request approvals → fails non-interactive without --sandbox.
   gemini  --yolo auto-approves everything; there is no edits-only middle tier for -p.
   copilot -p requires --allow-all-tools to run programmatically.
@@ -30,9 +35,10 @@ ALLOWLIST = ("claude", "codex", "gemini", "copilot")
 AGENT_CLIS = {
     "claude": {
         "cmd_safe": ["claude", "-p"],
-        "cmd_unattended": ["claude", "-p", "--permission-mode", "acceptEdits"],
-        "grants": ("auto-approves FILE EDITS; shell commands and network stay gated "
-                   "(full bypass would be --dangerously-skip-permissions — not suggested)"),
+        "cmd_unattended": ["claude", "-p", "--permission-mode", "bypassPermissions"],
+        "grants": ("auto-approves ALL tool calls — file writes, shell AND network (same as "
+                   "--dangerously-skip-permissions); the ANS deny-hooks stay the safety floor. "
+                   "Edits-only modes are not enough: headless -p auto-DENIES gated shell calls"),
         "version_args": ["--version"],
     },
     "codex": {
@@ -60,17 +66,75 @@ AGENT_CLIS = {
 
 # Per-CLI argv markers whose presence means tool calls are NOT interactively gated — a
 # DETACHED run (stdin closed) won't stall on an approval prompt. Kept in lockstep with the
-# cmd_unattended vs cmd_safe delta above: cmd_unattended carries exactly these, cmd_safe none.
+# cmd_unattended vs cmd_safe delta above: cmd_unattended carries one of these, cmd_safe none.
 # "flags" = bare autonomy flags; "pairs" = flag→accepted-values (a "--flag value" or
-# "--flag=value" whose value is non-interactive). Re-verify when a CLI's flags change.
+# "--flag=value" whose value is non-interactive). "Won't hang" is a weaker claim than
+# "runs end-to-end": for claude, acceptEdits and auto are listed here (no prompt) but only
+# bypassPermissions is full autonomy — see claude_permission_level, which the launcher uses
+# to decide GO / NOTE / NO-GO. Re-verify when a CLI's flags change.
 NONINTERACTIVE_MARKERS = {
     "claude": {"flags": {"--dangerously-skip-permissions"},
-               "pairs": {"--permission-mode": {"acceptEdits", "bypassPermissions"}}},
+               "pairs": {"--permission-mode": {"acceptEdits", "auto", "bypassPermissions"}}},
     "codex": {"flags": set(),
               "pairs": {"--sandbox": {"workspace-write", "danger-full-access"}}},
     "gemini": {"flags": {"--yolo"}, "pairs": {}},
     "copilot": {"flags": {"--allow-all-tools"}, "pairs": {}},
 }
+
+# claude --permission-mode values, ranked by what a DETACHED -p run can actually do with them.
+_CLAUDE_MODE_LEVEL = {"bypassPermissions": "full", "auto": "auto", "acceptEdits": "edits"}
+
+
+def claude_level_for_mode(mode: str) -> str:
+    """Level (see claude_permission_level) for a bare permission-mode VALUE — the same ranking
+    applied to a mode that comes from Claude Code's settings files instead of the argv."""
+    return _CLAUDE_MODE_LEVEL.get(str(mode or ""), "gated")
+
+
+def _claude_mode_value(tokens: list) -> "tuple[int, str] | None":
+    """(index, value) of the first --permission-mode pair/=form in argv, or None."""
+    for i, tok in enumerate(tokens):
+        if tok == "--permission-mode" and i + 1 < len(tokens):
+            return i, tokens[i + 1]
+        if tok.startswith("--permission-mode="):
+            return i, tok.split("=", 1)[1]
+    return None
+
+
+def claude_permission_level(argv) -> str:
+    """How far a DETACHED `claude -p` run gets with this argv's permission mode:
+      full  — bypassPermissions / --dangerously-skip-permissions: runs end-to-end unattended.
+      auto  — --permission-mode auto: never prompts, but the classifier can still deny a step.
+      edits — acceptEdits: file edits auto-approved; gated shell/network calls are auto-DENIED
+              in headless -p, so a bash-heavy backlog silently makes no progress.
+      gated — no non-interactive marker (bare -p, plan, default, ...): prompts → hangs detached.
+    """
+    tokens = [str(a) for a in (argv or [])]
+    if "--dangerously-skip-permissions" in tokens:
+        return "full"
+    found = _claude_mode_value(tokens)
+    if found is None:
+        return "gated"
+    return _CLAUDE_MODE_LEVEL.get(found[1], "gated")
+
+
+def with_full_autonomy(argv) -> list:
+    """A copy of a claude argv rewritten to `--permission-mode bypassPermissions`: the value is
+    replaced in place (pair or =form) when a --permission-mode is present, appended otherwise;
+    an already-full argv and any non-claude argv come back unchanged. This is the one-step
+    repair the launcher offers — only ever applied after an explicit human yes."""
+    tokens = [str(a) for a in (argv or [])]
+    if cli_for_argv(tokens) != "claude" or claude_permission_level(tokens) == "full":
+        return tokens
+    found = _claude_mode_value(tokens)
+    if found is None:
+        return tokens + ["--permission-mode", "bypassPermissions"]
+    i, _ = found
+    if tokens[i] == "--permission-mode":
+        tokens[i + 1] = "bypassPermissions"
+    else:
+        tokens[i] = "--permission-mode=bypassPermissions"
+    return tokens
 
 
 def cli_for_argv(argv) -> str:
