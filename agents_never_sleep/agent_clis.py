@@ -203,6 +203,32 @@ def scaffold_preset(name: str, *, confirmed: bool) -> dict:
             "autonomy_confirmed": confirmed, "env": {}}
 
 
+def prompt_autonomy_presets(found: list, *, ask, out=print) -> dict:
+    """The ONE per-CLI autonomy prompt behind both onboarding entry points (config.run_wizard
+    and init_cmd.run_init) — anti-drift, same principle as scaffold_preset. For each installed
+    CLI: show the unattended invocation and what its flag grants, ask once (default no), and
+    return {name: preset row}. `ask(prompt, default)` is caller-owned (TTY/EOF handling
+    included); an unconfirmed CLI gets the safe cmd with autonomy OFF, never silently the
+    flag. Base rule (operator 2026-09-30): preparing a run means checking that the permission
+    mode cannot stop it, and offering the fix WITH consent — this is that offer."""
+    presets = {}
+    if not found:
+        return presets
+    out("")
+    out("Detached runs (bin/ans-run) need an agent CLI + an explicit autonomy choice.")
+    for name in found:
+        spec = AGENT_CLIS[name]
+        out(f"  {name}: unattended needs `{' '.join(spec['cmd_unattended'])}`")
+        out(f"    this flag: {spec['grants']}")
+        confirmed = str(ask(f"  Confirm this autonomy flag for {name}? (y/n)",
+                            "n")).lower().startswith("y")
+        presets[name] = scaffold_preset(name, confirmed=confirmed)
+        if not confirmed:
+            out(f"    {name} saved WITHOUT autonomy — detached launches with it will refuse "
+                "until you confirm (re-run the wizard or edit the config and re-trust).")
+    return presets
+
+
 def installed_clis() -> list:
     """Which known agent CLIs resolve in PATH right now (wizard scaffolding input)."""
     return [name for name in AGENT_CLIS if shutil.which(name)]

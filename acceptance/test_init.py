@@ -294,6 +294,65 @@ def test_handoff_generic_when_no_harness():
     assert "install-hooks" in out
 
 
+def test_interactive_init_offers_full_autonomy_per_installed_cli():
+    # Base rule (operator, 2026-09-30): while PREPARING a run (init included) ANS checks whether
+    # the configured permission mode would stop it and offers the unattended flag WITH consent.
+    # "y" → the preset is the unattended variant and autonomy_confirmed; "n" → the safe cmd with
+    # autonomy OFF (today's behaviour). The offer is the SAME per-CLI prompt the wizard uses
+    # (agent_clis.prompt_autonomy_presets — one UI, two entry points), and trust is recorded
+    # for the FINAL config so a detached run can start right after a "y".
+    import contextlib, io
+    from agents_never_sleep import init_cmd, config, agent_clis, trust
+    full = agent_clis.AGENT_CLIS["claude"]["cmd_unattended"]
+    safe = agent_clis.AGENT_CLIS["claude"]["cmd_safe"]
+    assert "bypassPermissions" in full
+    for answer, want_cmd, want_confirmed in (("y", full, True), ("n", safe, False)):
+        repo = tempfile.mkdtemp(); subprocess.run(["git", "init", "-q", repo], check=True)
+        home = tempfile.mkdtemp(); consent_dir = tempfile.mkdtemp()
+        answers = [answer] + ["n"] * 30   # autonomy offer first, then the per-class consent prompts
+        remaining = list(answers)
+        prompts = []
+
+        def _fake_input(prompt):
+            prompts.append(prompt)
+            return remaining.pop(0) if remaining else ""
+        buf = io.StringIO()
+        with unittest.mock.patch.object(init_cmd, "_stdin_is_tty", return_value=True), \
+             unittest.mock.patch.object(init_cmd.agent_clis, "installed_clis", return_value=["claude"]), \
+             unittest.mock.patch("builtins.input", side_effect=_fake_input), \
+             unittest.mock.patch.dict(os.environ, {"HOME": home, "ANS_CONSENT_STORE": consent_dir,
+                                                     "ANS_TEST_MODE": "1"}):
+            with contextlib.redirect_stdout(buf):
+                rc = init_cmd.run_init(["--repo", repo])
+            assert rc == 0, rc
+            preset = json.load(open(config.config_path(repo)))["launcher"]["agents"]["claude"]
+            assert preset["cmd"] == want_cmd, (answer, preset)
+            assert preset["autonomy_confirmed"] is want_confirmed, (answer, preset)
+            assert trust.is_trusted(repo, config.config_path(repo)), "trust must cover the FINAL config"
+        assert prompts and "autonomy" in prompts[0].lower(), prompts[:2]
+        assert "bypassPermissions" in buf.getvalue(), buf.getvalue()   # the flag is SHOWN before asking
+
+    # --yes (and a non-TTY) never silently authorizes: safe cmd, autonomy OFF, no prompt.
+    repo = tempfile.mkdtemp(); subprocess.run(["git", "init", "-q", repo], check=True)
+    home = tempfile.mkdtemp()
+    with unittest.mock.patch.object(init_cmd.agent_clis, "installed_clis", return_value=["claude"]), \
+         unittest.mock.patch("builtins.input", side_effect=AssertionError("must not prompt")), \
+         unittest.mock.patch.dict(os.environ, {"HOME": home}):
+        rc = init_cmd.run_init(["--repo", repo, "--yes"])
+    assert rc == 0, rc
+    preset = json.load(open(config.config_path(repo)))["launcher"]["agents"]["claude"]
+    assert preset["cmd"] == safe and preset["autonomy_confirmed"] is False, preset
+
+
+def test_wizard_and_init_share_one_autonomy_prompt():
+    # Anti-drift guard (same principle as scaffold_preset / prompt_and_write_consent): both
+    # onboarding entry points must call agent_clis.prompt_autonomy_presets, never a copy.
+    import inspect
+    from agents_never_sleep import config, init_cmd
+    assert "prompt_autonomy_presets" in inspect.getsource(config.run_wizard)
+    assert "prompt_autonomy_presets" in inspect.getsource(init_cmd.run_init)
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):

@@ -482,8 +482,20 @@ def run_init(argv: list[str]) -> int:
     for name in installed:                 # ...we ADD one preset per installed CLI alongside it.
         cfg["launcher"]["agents"][name] = agent_clis.scaffold_preset(name, confirmed=False)
     cfg["launcher"]["default_agent"] = harness   # None when no CLI installed (schema allows null)
+    # Base rule (operator 2026-09-30): preparing a run = checking the permission mode cannot
+    # stop it, and offering the unattended flag WITH consent. Interactive only — under --yes or
+    # a non-TTY the safe cmd stays and autonomy is OFF (skip-prompts never authorizes). Done
+    # BEFORE save + trust so trust covers the config a "y" produces. Same prompt as the wizard.
+    if installed and not a.yes and _stdin_is_tty():
+        cfg["launcher"]["agents"].update(
+            agent_clis.prompt_autonomy_presets(installed, ask=_ask_consent))
+    confirmed = [n for n in installed if cfg["launcher"]["agents"][n].get("autonomy_confirmed")]
     config.save_config(repo, cfg)
-    print(f"Wrote {cfg_path} (safe defaults; autonomy stays OFF until you confirm via `ans-run`).")
+    if confirmed:
+        print(f"Wrote {cfg_path} (autonomy confirmed for: {', '.join(confirmed)}).")
+    else:
+        print(f"Wrote {cfg_path} (safe defaults; autonomy stays OFF until you confirm via "
+              "`ans-run`).")
 
     # TOFU trust: a detached run NO-GOes on an untrusted config (launcher check_trust). record_trust
     # writes ONLY the ANS trust store ~/.config/agents-never-sleep/trusted.json — never a harness

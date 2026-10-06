@@ -361,23 +361,12 @@ def run_wizard(repo_dir: str, profile) -> dict:
     # Launcher presets: scaffold one preset per INSTALLED known agent CLI, and make the
     # autonomy decision explicit per CLI (security review 2026-06-10: autonomy flags are
     # never applied silently — the human sees what the flag grants and confirms).
-    from .agent_clis import AGENT_CLIS, detect_session_platform, installed_clis, scaffold_preset
+    from .agent_clis import detect_session_platform, installed_clis, prompt_autonomy_presets
     launcher = cfg["launcher"]
     found = installed_clis()
     if found:
-        print("")
-        print("Detached runs (bin/ans-run) need an agent CLI + an explicit autonomy choice.")
-        for name in found:
-            spec = AGENT_CLIS[name]
-            print(f"  {name}: unattended needs `{' '.join(spec['cmd_unattended'])}`")
-            print(f"    this flag: {spec['grants']}")
-            confirmed = ask(f"  Confirm this autonomy flag for {name}? (y/n)",
-                            "n").lower().startswith("y")
-            launcher["agents"][name] = scaffold_preset(name, confirmed=confirmed)
-            if not confirmed:
-                print(f"    {name} saved WITHOUT autonomy — detached launches with it "
-                      "will refuse until you confirm (re-run the wizard or edit the "
-                      "config and re-trust).")
+        # Shared with `ans-run init` (init_cmd.run_init) — one prompt, two entry points.
+        launcher["agents"].update(prompt_autonomy_presets(found, ask=ask))
         hint = detect_session_platform()
         default = hint if hint in launcher["agents"] else found[0]
         launcher["default_agent"] = ask("Default agent preset for detached runs",
