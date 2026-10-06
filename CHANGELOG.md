@@ -10,6 +10,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-06
+
+Unattended Claude Code runs now require a permission mode that cannot stop the run: full bypass by
+default, `auto` as the accepted minimum, `acceptEdits` and a bare `claude -p` refused — with a
+consent-gated one-step repair wherever a human is preparing the run. MINOR: the Stable `ans-run`
+flags, exit codes and `launcher` config shape are unchanged; what changed is the preflight's verdict
+on an edits-only preset (migration note below).
+
 ### Changed
 - **Claude Code's shipped unattended invocation is now `claude -p --permission-mode
   bypassPermissions`** (was `acceptEdits`). Operator decision 2026-09-30: permission prompts are
